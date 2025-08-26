@@ -51,12 +51,37 @@ end
 
 # Ensure Homebrew (Linuxbrew) is installed and available in fish
 function ensure_brew
+    # Try to find brew even if not in PATH
+    set -l brew_bin ""
     if type -q brew
         set -g SUMMARY_BREW "already present"
         return 0
+    else if test -x $HOME/.linuxbrew/bin/brew
+        set brew_bin "$HOME/.linuxbrew/bin/brew"
+    else if test -x /home/linuxbrew/.linuxbrew/bin/brew
+        set brew_bin "/home/linuxbrew/.linuxbrew/bin/brew"
+    else if test -x /opt/homebrew/bin/brew
+        set brew_bin "/opt/homebrew/bin/brew"
     end
+
+    if test -n "$brew_bin"
+        # Load into current session and persist
+        eval ($brew_bin shellenv); or begin
+            # Fallback: force PATH for this session
+            set -gx PATH (dirname $brew_bin) (realpath (dirname $brew_bin)/../sbin) $PATH
+        end
+        set -l fish_cfg "$HOME/.config/fish/config.fish"
+        if not test -f "$fish_cfg"; mkdir -p (dirname "$fish_cfg"); touch "$fish_cfg"; end
+        set -l brew_shellenv_line "eval ($brew_bin shellenv)"
+        if not grep -q "$brew_shellenv_line" "$fish_cfg" 2>/dev/null
+            echo "$brew_shellenv_line" >> "$fish_cfg"
+        end
+        set -g SUMMARY_BREW "available (PATH updated)"
+        return 0
+    end
+
+    # Not found locally; install
     info "Installing Homebrew (Linuxbrew)"
-    # Ensure curl for installer
     if not type -q curl
         info "Installing curl via pacman"
         ensure_pacman_packages curl; or begin
@@ -68,13 +93,12 @@ function ensure_brew
         err "bash not found; please install bash and re-run"
         return 1
     end
-    # Run official installer (pipe into bash; fish doesn't support $() )
     curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh | bash; or begin
         err "Homebrew installation failed"
         return 1
     end
-    # Locate brew binary and load into current session
-    set -l brew_bin ""
+    # Detect again after install
+    set brew_bin ""
     if test -x $HOME/.linuxbrew/bin/brew
         set brew_bin "$HOME/.linuxbrew/bin/brew"
     else if test -x /home/linuxbrew/.linuxbrew/bin/brew
@@ -83,16 +107,13 @@ function ensure_brew
         set brew_bin "/opt/homebrew/bin/brew"
     end
     if test -n "$brew_bin"
-        eval ($brew_bin shellenv)
-        # Persist into fish config
+        eval ($brew_bin shellenv); or set -gx PATH (dirname $brew_bin) (realpath (dirname $brew_bin)/../sbin) $PATH
         set -l fish_cfg "$HOME/.config/fish/config.fish"
         if not test -f "$fish_cfg"; mkdir -p (dirname "$fish_cfg"); touch "$fish_cfg"; end
         set -l brew_shellenv_line "eval ($brew_bin shellenv)"
         if not grep -q "$brew_shellenv_line" "$fish_cfg" 2>/dev/null
             echo "$brew_shellenv_line" >> "$fish_cfg"
         end
-    end
-    if type -q brew
         set -g SUMMARY_BREW "installed"
         return 0
     else
@@ -605,42 +626,32 @@ if type -q brew
     set -lx HOMEBREW_NO_INSTALL_FROM_API 1
     set -lx GIT_TERMINAL_PROMPT 0
 
-    # Try to install 'codex' formula if it exists
-    if brew info codex >/dev/null 2>&1
-        if brew list --formula codex >/dev/null 2>&1
-            log "brew package codex already installed"
-            set brew_present $brew_present codex
-        else
-            info "Installing codex via brew"
-            if brew install codex >/dev/null 2>&1
-                set brew_installed $brew_installed codex
-            else
-                warn "Failed to install codex via brew"
-                set brew_failed $brew_failed codex
-            end
-        end
+    # Codex (formula) — try install; if not found, record failure
+    if brew list --formula codex >/dev/null 2>&1
+        log "brew package codex already installed"
+        set brew_present $brew_present codex
     else
-        warn "brew formula 'codex' not found"
-        set brew_failed $brew_failed codex
+        info "Installing codex via brew"
+        if brew install codex
+            set brew_installed $brew_installed codex
+        else
+            warn "Failed to install codex via brew"
+            set brew_failed $brew_failed codex
+        end
     end
 
-    # Try to install Claude Code as a cask if supported
-    if brew info --cask claude-code >/dev/null 2>&1
-        if brew list --cask claude-code >/dev/null 2>&1
-            log "brew cask claude-code already installed"
-            set brew_present $brew_present claude-code
-        else
-            info "Installing claude-code via brew cask"
-            if brew install --cask claude-code >/dev/null 2>&1
-                set brew_installed $brew_installed claude-code
-            else
-                warn "Failed to install claude-code via brew cask"
-                set brew_failed $brew_failed claude-code
-            end
-        end
+    # Claude Code (cask) — install with --cask (works on your machine)
+    if brew list --cask claude-code >/dev/null 2>&1
+        log "brew cask claude-code already installed"
+        set brew_present $brew_present claude-code
     else
-        warn "brew cask 'claude-code' not available on this platform"
-        set brew_failed $brew_failed claude-code
+        info "Installing claude-code via brew cask"
+        if brew install --cask claude-code
+            set brew_installed $brew_installed claude-code
+        else
+            warn "Failed to install claude-code via brew cask"
+            set brew_failed $brew_failed claude-code
+        end
     end
 end
 
