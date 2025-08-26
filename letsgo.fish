@@ -22,15 +22,7 @@ function err
     echo (set_color red)'[ERR] '(set_color normal)$argv 1>&2
 end
 
-# Pause helper for debugging (only when interactive)
-function pause_section -a title
-    if test -z "$NO_PAUSE"
-        if status is-interactive
-            set -l pause_enter ""
-            read -P "[PAUSE] $title — press Enter to continue" -l pause_enter
-        end
-    end
-end
+# (debug pause helper removed)
 
 # Helpers
 function ensure_pacman_packages
@@ -428,7 +420,7 @@ else
 end
 
 # Pause after autologin + Hyprland
-pause_section "Autologin + Hyprland autostart"
+## (pause removed)
 
 # Rebuild initramfs if plymouth hook was added or plymouth theme was set
 if test "$summary_plymouth_hook" = added
@@ -446,7 +438,7 @@ if test "$summary_plymouth_hook" = added
     end
 end
 
-pause_section "Plymouth install + HOOKS/initramfs"
+## (pause removed)
 
 # Ensure kernel parameters include 'quiet splash' (GRUB and/or systemd-boot)
 # GRUB
@@ -555,7 +547,7 @@ if test -d /boot/loader/entries
     end
 end
 
-pause_section "Kernel parameters (quiet splash)"
+## (pause removed)
 
 # Install default applications via yay (if missing)
 info "Ensuring default applications are installed via yay"
@@ -594,7 +586,7 @@ for p in $default_pkgs
     end
 end
 
-pause_section "Yay + default application installs"
+## (pause removed)
 
 # Install Homebrew and selected brew packages
 info "Ensuring Homebrew (brew) is installed"
@@ -607,29 +599,53 @@ set -l brew_installed
 set -l brew_present
 set -l brew_failed
 if type -q brew
+    # Avoid GitHub prompts; operate without API usage
     set -lx HOMEBREW_NO_AUTO_UPDATE 1
     set -lx HOMEBREW_NO_GITHUB_API 1
-    set -l brew_pkgs codex anthropic/claude/claude
-    for b in $brew_pkgs
-        if brew list --formula $b >/dev/null 2>&1; or brew list --cask $b >/dev/null 2>&1
-            log "brew package $b already installed"
-            set brew_present $brew_present $b
+    set -lx HOMEBREW_NO_INSTALL_FROM_API 1
+    set -lx GIT_TERMINAL_PROMPT 0
+
+    # Try to install 'codex' formula if it exists
+    if brew info codex >/dev/null 2>&1
+        if brew list --formula codex >/dev/null 2>&1
+            log "brew package codex already installed"
+            set brew_present $brew_present codex
         else
-            info "Installing $b via brew (best-effort)"
-            set -lx HOMEBREW_NO_AUTO_UPDATE 1
-            set -lx HOMEBREW_NO_GITHUB_API 1
-            if brew install $b >/dev/null 2>&1
-                set brew_installed $brew_installed $b
+            info "Installing codex via brew"
+            if brew install codex >/dev/null 2>&1
+                set brew_installed $brew_installed codex
             else
-                warn "Failed to install $b via brew"
-                set brew_failed $brew_failed $b
+                warn "Failed to install codex via brew"
+                set brew_failed $brew_failed codex
             end
         end
+    else
+        warn "brew formula 'codex' not found"
+        set brew_failed $brew_failed codex
+    end
+
+    # Try to install Claude Code as a cask if supported
+    if brew info --cask claude-code >/dev/null 2>&1
+        if brew list --cask claude-code >/dev/null 2>&1
+            log "brew cask claude-code already installed"
+            set brew_present $brew_present claude-code
+        else
+            info "Installing claude-code via brew cask"
+            if brew install --cask claude-code >/dev/null 2>&1
+                set brew_installed $brew_installed claude-code
+            else
+                warn "Failed to install claude-code via brew cask"
+                set brew_failed $brew_failed claude-code
+            end
+        end
+    else
+        warn "brew cask 'claude-code' not available on this platform"
+        set brew_failed $brew_failed claude-code
     end
 end
 
 # Pause after brew setup
-pause_section "Homebrew setup + brew packages"
+## (pause removed)
 
 # Print status summary
 echo
