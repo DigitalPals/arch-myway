@@ -285,12 +285,16 @@ else
     warn "No Plymouth theme source found; skipping theme install"
 end
 
-# Ensure mkinitcpio has the plymouth hook and rebuild initramfs
+"# Ensure mkinitcpio has the plymouth hook and rebuild initramfs"
 set -l mkconf "/etc/mkinitcpio.conf"
-if test -r $mkconf
-    set -l hooks_line (sudo awk '/^HOOKS=/{print; exit}' $mkconf)
-    if test -n "$hooks_line"
-        set -l hooks_inner (string replace -r '^HOOKS=\((.*)\)\s*$' '$1' -- $hooks_line)
+if not type -q sudo
+    warn "sudo not available; skipping mkinitcpio hook update"
+else if not test -r $mkconf
+    warn "Cannot read $mkconf to verify plymouth hook"
+else
+    # Extract HOOKS inner content, ignoring leading whitespace and trailing comments
+    set -l hooks_inner (sed -n -E 's/^[[:space:]]*HOOKS=\(([^)]*)\).*$/\1/p' $mkconf | head -n1)
+    if test -n "$hooks_inner"
         set -l tokens $hooks_inner
         if contains -- plymouth $tokens
             set summary_plymouth_hook "already present"
@@ -324,18 +328,21 @@ if test -r $mkconf
             if test -z "$tmpconf"
                 err "Failed to create temporary file for mkinitcpio.conf"
             else
-                sudo awk -v new="$new_hooks_line" 'BEGIN{done=0} /^HOOKS=/{print new; done=1; next} {print} END{if(!done) exit 1}' $mkconf | sudo tee $tmpconf >/dev/null; and sudo mv "$tmpconf" "$mkconf"; and begin
-                    set summary_plymouth_hook "added"
-                end; or begin
-                    err "Failed to update HOOKS in $mkconf"
+                awk -v new="$new_hooks_line" 'BEGIN{done=0} /^[[:space:]]*HOOKS=/{print new; done=1; next} {print} END{if(!done) exit 1}' $mkconf > $tmpconf
+                if test $status -eq 0
+                    if sudo install -m 644 $tmpconf $mkconf
+                        set summary_plymouth_hook "added"
+                    else
+                        err "Failed to write $mkconf"
+                    end
+                else
+                    warn "HOOKS= line not found or replace failed in $mkconf"
                 end
             end
         end
     else
         warn "HOOKS= line not found in $mkconf"
     end
-else
-    warn "Cannot read $mkconf to verify plymouth hook"
 end
 
 # Hyprland: install, enable TTY1 autologin, and autostart on login
@@ -362,7 +369,7 @@ if test -n "$current_user"
             err "Failed to create temporary file for getty override"
         else
             mkdir -p (dirname $tmpf) >/dev/null 2>&1
-            printf "[Service]\nExecStart=\nExecStart=-/usr/bin/agetty --autologin %s --noclear %%I $TERM\n" "$current_user" | sudo tee $tmpf >/dev/null
+            printf "[Service]\nExecStart=\nExecStart=-/usr/bin/agetty --autologin %s --noclear %%I 38400 linux\n" "$current_user" | sudo tee $tmpf >/dev/null
             if sudo mkdir -p -- "$dropin_dir"; and sudo mv "$tmpf" "$override_path"
                 sudo systemctl daemon-reload >/dev/null 2>&1
                 sudo systemctl enable getty@tty1.service >/dev/null 2>&1
@@ -570,6 +577,8 @@ if type -q brew
             set brew_present $brew_present $b
         else
             info "Installing $b via brew (best-effort)"
+            set -lx HOMEBREW_NO_AUTO_UPDATE 1
+            set -lx HOMEBREW_NO_GITHUB_API 1
             if brew install $b >/dev/null 2>&1
                 set brew_installed $brew_installed $b
             else
