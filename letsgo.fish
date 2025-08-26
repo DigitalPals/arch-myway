@@ -24,7 +24,7 @@ end
 
 # Pause helper for debugging (only when interactive)
 function pause_section -a title
-    if status is-interactive
+    if test -z "$NO_PAUSE"
         set -l prompt "[PAUSE] $title — press Enter to continue"
         read -P "$prompt" -l _
     end
@@ -391,8 +391,8 @@ if test -n "$current_user"
             err "Failed to create temporary file for getty override"
         else
             mkdir -p (dirname $tmpf) >/dev/null 2>&1
-            printf "[Service]\nExecStart=\nExecStart=-/usr/bin/agetty --autologin %s --noclear %%I 38400 linux\n" "$current_user" | sudo tee $tmpf >/dev/null
-            if sudo mkdir -p -- "$dropin_dir"; and sudo mv "$tmpf" "$override_path"
+            printf "[Service]\nExecStart=\nExecStart=-/usr/bin/agetty --autologin %s --noclear %%I 38400 linux\n" "$current_user" > $tmpf
+            if sudo mkdir -p -- "$dropin_dir"; and sudo install -m 644 "$tmpf" "$override_path"
                 sudo systemctl daemon-reload >/dev/null 2>&1
                 sudo systemctl enable getty@tty1.service >/dev/null 2>&1
                 set summary_autologin "configured for $current_user"
@@ -529,10 +529,12 @@ if test -d /boot/loader/entries
                 if test -z "$tmpf"
                     err "Failed to create temporary file for systemd-boot entry"
                 else
-                    sudo awk -v nl="$new_opts" 'BEGIN{done=0} /^options /{print nl; done=1; next} {print} END{if(!done) print nl}' $f | sudo tee $tmpf >/dev/null; and sudo mv $tmpf $f; and begin
-                        set updated_any 1
-                    end; or begin
-                        err "Failed to update $f"
+                    awk -v nl="$new_opts" 'BEGIN{done=0} /^options /{print nl; done=1; next} {print} END{if(!done) print nl}' $f > $tmpf; and begin
+                        if sudo install -m 644 $tmpf $f
+                            set updated_any 1
+                        else
+                            err "Failed to install updated entry for $f"
+                        end
                     end
                 end
             end
