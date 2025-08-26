@@ -22,6 +22,14 @@ function err
     echo (set_color red)'[ERR] '(set_color normal)$argv 1>&2
 end
 
+# Pause helper for debugging (only when interactive)
+function pause_section -a title
+    if status is-interactive
+        set -l prompt "[PAUSE] $title — press Enter to continue"
+        read -P "$prompt" -l _
+    end
+end
+
 # Helpers
 function ensure_pacman_packages
     # Usage: ensure_pacman_packages pkg1 pkg2 ...
@@ -310,17 +318,31 @@ else
             if test $idx_udev -gt 0
                 set tokens_new $tokens[1..$idx_udev] plymouth $tokens[(math $idx_udev + 1)..-1]
             else
-                set -l idx_base 0
+                # Try after systemd (systemd-based images)
+                set -l idx_systemd 0
                 for i in (seq 1 (count $tokens))
-                    if test $tokens[$i] = base
-                        set idx_base $i
+                    if test $tokens[$i] = systemd
+                        set idx_systemd $i
                         break
                     end
                 end
-                if test $idx_base -gt 0
-                    set tokens_new $tokens[1..$idx_base] plymouth $tokens[(math $idx_base + 1)..-1]
+                if test $idx_systemd -gt 0
+                    set tokens_new $tokens[1..$idx_systemd] plymouth $tokens[(math $idx_systemd + 1)..-1]
                 else
-                    set tokens_new plymouth $tokens
+                    # Try after base
+                    set -l idx_base 0
+                    for i in (seq 1 (count $tokens))
+                        if test $tokens[$i] = base
+                            set idx_base $i
+                            break
+                        end
+                    end
+                    if test $idx_base -gt 0
+                        set tokens_new $tokens[1..$idx_base] plymouth $tokens[(math $idx_base + 1)..-1]
+                    else
+                        # Append to end as safe fallback
+                        set tokens_new $tokens plymouth
+                    end
                 end
             end
             set -l new_hooks_line "HOOKS=("(string join ' ' $tokens_new)")"
@@ -403,6 +425,9 @@ else
     end
 end
 
+# Pause after autologin + Hyprland
+pause_section "Autologin + Hyprland autostart"
+
 # Rebuild initramfs if plymouth hook was added or plymouth theme was set
 if test "$summary_plymouth_hook" = added
     if type -q sudo; and type -q mkinitcpio
@@ -418,6 +443,8 @@ if test "$summary_plymouth_hook" = added
         set summary_initramfs "skipped"
     end
 end
+
+pause_section "Plymouth install + HOOKS/initramfs"
 
 # Ensure kernel parameters include 'quiet splash' (GRUB and/or systemd-boot)
 # GRUB
@@ -522,6 +549,8 @@ if test -d /boot/loader/entries
     end
 end
 
+pause_section "Kernel parameters (quiet splash)"
+
 # Install default applications via yay (if missing)
 info "Ensuring default applications are installed via yay"
 if type -q sudo; and type -q pacman
@@ -559,6 +588,8 @@ for p in $default_pkgs
     end
 end
 
+pause_section "Yay + default application installs"
+
 # Install Homebrew and selected brew packages
 info "Ensuring Homebrew (brew) is installed"
 set -g SUMMARY_BREW "already present"
@@ -570,7 +601,9 @@ set -l brew_installed
 set -l brew_present
 set -l brew_failed
 if type -q brew
-    set -l brew_pkgs codex claude-code
+    set -lx HOMEBREW_NO_AUTO_UPDATE 1
+    set -lx HOMEBREW_NO_GITHUB_API 1
+    set -l brew_pkgs codex anthropic/claude/claude
     for b in $brew_pkgs
         if brew list --formula $b >/dev/null 2>&1; or brew list --cask $b >/dev/null 2>&1
             log "brew package $b already installed"
@@ -582,21 +615,15 @@ if type -q brew
             if brew install $b >/dev/null 2>&1
                 set brew_installed $brew_installed $b
             else
-                set -l ok 0
-                if test $b = claude-code
-                    brew tap anthropic/claude >/dev/null 2>&1; and brew install claude >/dev/null 2>&1; and set ok 1
-                    if test $ok -eq 1
-                        set brew_installed $brew_installed claude
-                    end
-                end
-                if test $ok -eq 0
-                    warn "Failed to install $b via brew"
-                    set brew_failed $brew_failed $b
-                end
+                warn "Failed to install $b via brew"
+                set brew_failed $brew_failed $b
             end
         end
     end
 end
+
+# Pause after brew setup
+pause_section "Homebrew setup + brew packages"
 
 # Print status summary
 echo
