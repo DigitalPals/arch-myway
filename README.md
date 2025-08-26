@@ -1,5 +1,9 @@
 Arch My Way (WIP)
 
+Prerequisites
+- Minimal Arch Linux install with LUKS encryption.
+- Caelestia dots installed: https://github.com/caelestia-dots/caelestia
+
 Run (fish)
 - One‑liner after a fresh Arch install:
   - `curl -fsSL https://raw.githubusercontent.com/DigitalPals/arch-myway/main/letsgo.fish | fish`
