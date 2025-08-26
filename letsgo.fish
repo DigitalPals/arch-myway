@@ -429,15 +429,37 @@ set -l hypr_snip "# --- autostart Hyprland on tty1 ($hypr_marker) ---\nif status
 if not test -f "$fish_cfg"
     mkdir -p (dirname "$fish_cfg"); and touch "$fish_cfg"
 end
-if grep -q "$hypr_marker" "$fish_cfg" 2>/dev/null
-    set summary_hypr_autostart "already present"
+# Replace any existing block between markers to avoid stale/broken content
+set -l tmpf (mktemp)
+if test -z "$tmpf"
+    err "Failed to create temporary file for fish config"
 else
-    if printf "%s" "$hypr_snip" >> "$fish_cfg"
-        set summary_hypr_autostart "configured"
-    else
-        set summary_hypr_autostart "failed"
-        err "Failed to append Hyprland autostart to $fish_cfg"
+    awk 'BEGIN{skip=0}
+         index($0, "# --- autostart Hyprland on tty1 (" ) {skip=1; next}
+         index($0, "# --- end " ) && skip==1 {skip=0; next}
+         skip==0 {print $0}' "$fish_cfg" > "$tmpf"
+    and printf "%b" "$hypr_snip" >> "$tmpf"
+    and mv "$tmpf" "$fish_cfg"; or begin
+        err "Failed to update $fish_cfg"
     end
+    set summary_hypr_autostart "configured"
+end
+
+# Also add autostart for bash login shells on TTY1 (in case fish isn't default)
+set -l bash_profile "$HOME/.bash_profile"
+set -l bash_marker "arch-myway-hypr"
+set -l bash_snip "# --- $bash_marker ---\nif [ -z \"$DISPLAY\" ] && [ \"$(tty)\" = \"/dev/tty1\" ]; then\n  if command -v Hyprland >/dev/null 2>&1; then\n    exec Hyprland\n  fi\nfi\n# --- end $bash_marker ---\n"
+if not test -f "$bash_profile"
+    touch "$bash_profile"
+end
+set -l tmpb (mktemp)
+if test -n "$tmpb"
+    awk 'BEGIN{skip=0}
+         index($0, "# --- $bash_marker ---") {skip=1; next}
+         index($0, "# --- end $bash_marker ---") && skip==1 {skip=0; next}
+         skip==0 {print $0}' "$bash_profile" > "$tmpb"
+    and printf "%b" "$bash_snip" >> "$tmpb"
+    and mv "$tmpb" "$bash_profile"
 end
 
 # Pause after autologin + Hyprland
