@@ -12,6 +12,7 @@ What it does
 - Copies wallpapers into `~/Pictures/Wallpapers` (keeps existing files).
 - Copies Caelestia config into `~/.config/caelestia` (overwrites existing files).
 - Creates target directories if missing.
+- Installs Plymouth and applies the Cybex theme.
 
 Rules
 - Do not run as root.

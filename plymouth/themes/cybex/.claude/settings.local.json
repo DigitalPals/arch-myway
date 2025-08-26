@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sudo plymouth-set-default-theme:*)",
+      "Bash(sudo mkinitcpio:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -155,6 +155,12 @@ end
 set -l did_anything 0
 set -l summary_wallpapers "skipped"
 set -l summary_caelestia "skipped"
+set -l summary_plymouth_pkg "skipped"
+set -l summary_plymouth_theme "skipped"
+set -l summary_plymouth_hook "unchanged"
+set -l summary_initramfs "skipped"
+set -l summary_kernel_params "unchanged"
+set -l summary_bootloader_update "skipped"
 
 # Wallpapers copy
 if test -n "$wallpapers_src"
@@ -210,6 +216,232 @@ if test $did_anything -eq 0
     warn "No file sources found; continuing to package setup."
 end
 
+# Plymouth install and theme setup (Cybex)
+if pacman -Qi -- plymouth >/dev/null 2>/dev/null
+    set summary_plymouth_pkg "already installed"
+else
+    info "Installing plymouth"
+    if type -q sudo; and type -q pacman
+        if sudo pacman -Sy --needed --noconfirm plymouth
+            set summary_plymouth_pkg "installed"
+        else
+            err "Failed to install plymouth"
+            set summary_plymouth_pkg "install failed"
+        end
+    else
+        err "Cannot install plymouth automatically (need sudo and pacman)"
+        set summary_plymouth_pkg "install skipped"
+    end
+end
+
+# Source for cybex theme
+set -l plymouth_theme_src ""
+if set -q PLYMOUTH_THEME_SRC; and test -d "$PLYMOUTH_THEME_SRC"
+    set plymouth_theme_src "$PLYMOUTH_THEME_SRC"
+else if test -n "$repo_root"; and test -d "$repo_root/plymouth/themes/cybex"
+    set plymouth_theme_src "$repo_root/plymouth/themes/cybex"
+end
+
+if test -n "$plymouth_theme_src"
+    set -l plymouth_theme_dst "/usr/share/plymouth/themes/cybex"
+    info "Installing Plymouth theme 'cybex' to $plymouth_theme_dst"
+    if type -q sudo
+        if sudo mkdir -p -- "/usr/share/plymouth/themes"; and sudo cp -R -f -- "$plymouth_theme_src" "$plymouth_theme_dst"
+            set summary_plymouth_theme "installed"
+            if type -q plymouth-set-default-theme
+                info "Setting default Plymouth theme to 'cybex' and rebuilding initramfs"
+                if sudo plymouth-set-default-theme -R cybex
+                    set summary_plymouth_theme "installed and set as default"
+                else
+                    warn "Failed to set default theme via plymouth-set-default-theme"
+                end
+            else
+                warn "plymouth-set-default-theme not found; theme copied only"
+            end
+        else
+            err "Failed to copy Plymouth theme to $plymouth_theme_dst"
+            set summary_plymouth_theme "copy failed"
+        end
+    else
+        err "sudo not available; cannot install Plymouth theme"
+        set summary_plymouth_theme "install skipped"
+    end
+else
+    warn "No Plymouth theme source found; skipping theme install"
+end
+
+# Ensure mkinitcpio has the plymouth hook and rebuild initramfs
+set -l mkconf "/etc/mkinitcpio.conf"
+if test -r $mkconf
+    set -l hooks_line (sudo awk '/^HOOKS=/{print; exit}' $mkconf)
+    if test -n "$hooks_line"
+        set -l hooks_inner (string replace -r '^HOOKS=\((.*)\)\s*$' '$1' -- $hooks_line)
+        set -l tokens $hooks_inner
+        if contains -- plymouth $tokens
+            set summary_plymouth_hook "already present"
+        else
+            set -l idx_udev 0
+            for i in (seq 1 (count $tokens))
+                if test $tokens[$i] = udev
+                    set idx_udev $i
+                    break
+                end
+            end
+            set -l tokens_new
+            if test $idx_udev -gt 0
+                set tokens_new $tokens[1..$idx_udev] plymouth $tokens[(math $idx_udev + 1)..-1]
+            else
+                set -l idx_base 0
+                for i in (seq 1 (count $tokens))
+                    if test $tokens[$i] = base
+                        set idx_base $i
+                        break
+                    end
+                end
+                if test $idx_base -gt 0
+                    set tokens_new $tokens[1..$idx_base] plymouth $tokens[(math $idx_base + 1)..-1]
+                else
+                    set tokens_new plymouth $tokens
+                end
+            end
+            set -l new_hooks_line "HOOKS=("(string join ' ' $tokens_new)")"
+            set -l tmpconf (mktemp)
+            if test -z "$tmpconf"
+                err "Failed to create temporary file for mkinitcpio.conf"
+            else
+                sudo awk -v new="$new_hooks_line" 'BEGIN{done=0} /^HOOKS=/{print new; done=1; next} {print} END{if(!done) exit 1}' $mkconf | sudo tee $tmpconf >/dev/null; and sudo mv "$tmpconf" "$mkconf"; and begin
+                    set summary_plymouth_hook "added"
+                end; or begin
+                    err "Failed to update HOOKS in $mkconf"
+                end
+            end
+        end
+    else
+        warn "HOOKS= line not found in $mkconf"
+    end
+else
+    warn "Cannot read $mkconf to verify plymouth hook"
+end
+
+# Rebuild initramfs if plymouth hook was added or plymouth theme was set
+if test "$summary_plymouth_hook" = added
+    if type -q sudo; and type -q mkinitcpio
+        info "Rebuilding initramfs (mkinitcpio -P)"
+        if sudo mkinitcpio -P
+            set summary_initramfs "rebuilt"
+        else
+            err "mkinitcpio rebuild failed"
+            set summary_initramfs "rebuild failed"
+        end
+    else
+        warn "Cannot rebuild initramfs automatically (need sudo and mkinitcpio)"
+        set summary_initramfs "skipped"
+    end
+end
+
+# Ensure kernel parameters include 'quiet splash' (GRUB and/or systemd-boot)
+# GRUB
+if test -r /etc/default/grub
+    set -l grub_line (sudo awk -F= '/^GRUB_CMDLINE_LINUX_DEFAULT=/ {print $0; found=1} END{if(!found) exit 2}' /etc/default/grub)
+    set -l have_line $status
+    set -l current_tokens
+    if test $have_line -eq 0
+        set -l current (string replace -r '^GRUB_CMDLINE_LINUX_DEFAULT="(.*)"\s*$' '$1' -- $grub_line)
+        set current_tokens $current
+    else
+        set current_tokens
+    end
+    set -l need_update 0
+    if not contains -- quiet $current_tokens
+        set current_tokens $current_tokens quiet
+        set need_update 1
+    end
+    if not contains -- splash $current_tokens
+        set current_tokens $current_tokens splash
+        set need_update 1
+    end
+    if test $need_update -eq 1
+        set -l new_line 'GRUB_CMDLINE_LINUX_DEFAULT="'(string join ' ' $current_tokens)'"'
+        set -l tmpf (mktemp)
+        if test -z "$tmpf"
+            err "Failed to create temporary file for grub config"
+        else
+            sudo awk -v nl="$new_line" 'BEGIN{done=0} /^GRUB_CMDLINE_LINUX_DEFAULT=/{print nl; done=1; next} {print} END{if(!done) print nl}' /etc/default/grub | sudo tee $tmpf >/dev/null; and sudo mv $tmpf /etc/default/grub; and begin
+                set summary_kernel_params "updated (grub)"
+                if type -q grub-mkconfig
+                    info "Updating GRUB config"
+                    if sudo grub-mkconfig -o /boot/grub/grub.cfg
+                        set summary_bootloader_update "grub updated"
+                    else
+                        set summary_bootloader_update "grub update failed"
+                        warn "grub-mkconfig failed"
+                    end
+                else
+                    set summary_bootloader_update "grub tool missing"
+                    warn "grub-mkconfig not found"
+                end
+            end; or begin
+                err "Failed to update /etc/default/grub"
+            end
+        end
+    else
+        if test "$summary_kernel_params" = "unchanged"
+            set summary_kernel_params "already present (grub)"
+        end
+    end
+end
+
+# systemd-boot
+if test -d /boot/loader/entries
+    set -l updated_any 0
+    for f in /boot/loader/entries/*.conf
+        if test -r $f
+            set -l opts_line (sudo awk '/^options /{print; found=1; exit} END{if(!found) exit 2}' $f)
+            set -l have_opts $status
+            set -l tokens
+            if test $have_opts -eq 0
+                set -l current (string replace -r '^options\s+(.*)$' '$1' -- $opts_line)
+                set tokens $current
+            else
+                set tokens
+            end
+            set -l changed 0
+            if not contains -- quiet $tokens
+                set tokens $tokens quiet
+                set changed 1
+            end
+            if not contains -- splash $tokens
+                set tokens $tokens splash
+                set changed 1
+            end
+            if test $changed -eq 1
+                set -l new_opts 'options '(string join ' ' $tokens)
+                set -l tmpf (mktemp)
+                if test -z "$tmpf"
+                    err "Failed to create temporary file for systemd-boot entry"
+                else
+                    sudo awk -v nl="$new_opts" 'BEGIN{done=0} /^options /{print nl; done=1; next} {print} END{if(!done) print nl}' $f | sudo tee $tmpf >/dev/null; and sudo mv $tmpf $f; and begin
+                        set updated_any 1
+                    end; or begin
+                        err "Failed to update $f"
+                    end
+                end
+            end
+        end
+    end
+    if test $updated_any -eq 1
+        if test "$summary_kernel_params" = "unchanged"
+            set summary_kernel_params "updated (systemd-boot)"
+        else
+            set summary_kernel_params "$summary_kernel_params + systemd-boot"
+        end
+    else
+        if test "$summary_kernel_params" = "unchanged"
+            set summary_kernel_params "already present (systemd-boot)"
+        end
+    end
+end
+
 # Install default applications via yay (if missing)
 info "Ensuring default applications are installed via yay"
 set -g SUMMARY_YAY "already present"
@@ -261,6 +493,8 @@ end
 if test -n "$join_failed"
     echo "- Apps failed: $join_failed"
 end
+echo "- Plymouth:    pkg=$summary_plymouth_pkg, theme=$summary_plymouth_theme, hook=$summary_plymouth_hook, initramfs=$summary_initramfs"
+echo "- Kernel:      params=$summary_kernel_params, bootloader_update=$summary_bootloader_update"
 
 # Cleanup temp directory if used
 if test -n "$tmpdir"; and test -d "$tmpdir"
