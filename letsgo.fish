@@ -449,7 +449,7 @@ pause_section "Plymouth install + HOOKS/initramfs"
 # Ensure kernel parameters include 'quiet splash' (GRUB and/or systemd-boot)
 # GRUB
 if test -r /etc/default/grub
-    set -l grub_line (sudo awk -F= '/^GRUB_CMDLINE_LINUX_DEFAULT=/ {print $0; found=1} END{if(!found) exit 2}' /etc/default/grub)
+    set -l grub_line (awk -F= '/^GRUB_CMDLINE_LINUX_DEFAULT=/ {print $0; found=1} END{if(!found) exit 2}' /etc/default/grub)
     set -l have_line $status
     set -l current_tokens
     if test $have_line -eq 0
@@ -473,22 +473,24 @@ if test -r /etc/default/grub
         if test -z "$tmpf"
             err "Failed to create temporary file for grub config"
         else
-            sudo awk -v nl="$new_line" 'BEGIN{done=0} /^GRUB_CMDLINE_LINUX_DEFAULT=/{print nl; done=1; next} {print} END{if(!done) print nl}' /etc/default/grub | sudo tee $tmpf >/dev/null; and sudo mv $tmpf /etc/default/grub; and begin
-                set summary_kernel_params "updated (grub)"
-                if type -q grub-mkconfig
-                    info "Updating GRUB config"
-                    if sudo grub-mkconfig -o /boot/grub/grub.cfg
-                        set summary_bootloader_update "grub updated"
+            awk -v nl="$new_line" 'BEGIN{done=0} /^[[:space:]]*GRUB_CMDLINE_LINUX_DEFAULT=/{print nl; done=1; next} {print} END{if(!done) print nl}' /etc/default/grub > $tmpf; and begin
+                if sudo install -m 644 $tmpf /etc/default/grub
+                    set summary_kernel_params "updated (grub)"
+                    if type -q grub-mkconfig
+                        info "Updating GRUB config"
+                        if sudo grub-mkconfig -o /boot/grub/grub.cfg
+                            set summary_bootloader_update "grub updated"
+                        else
+                            set summary_bootloader_update "grub update failed"
+                            warn "grub-mkconfig failed"
+                        end
                     else
-                        set summary_bootloader_update "grub update failed"
-                        warn "grub-mkconfig failed"
+                        set summary_bootloader_update "grub tool missing"
+                        warn "grub-mkconfig not found"
                     end
                 else
-                    set summary_bootloader_update "grub tool missing"
-                    warn "grub-mkconfig not found"
+                    err "Failed to update /etc/default/grub"
                 end
-            end; or begin
-                err "Failed to update /etc/default/grub"
             end
         end
     else
