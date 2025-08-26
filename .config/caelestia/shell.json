@@ -1,0 +1,7 @@
+{
+  "services": {
+    "weatherLocation": "52.71584,6.92682",
+    "useFahrenheit": false,
+    "useTwelveHourClock": false
+  }
+}
