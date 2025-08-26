@@ -27,16 +27,68 @@ if test (id -u) -eq 0
     exit 1
 end
 
+# Ensure yay (AUR helper) is available; install if missing
+function ensure_yay
+    if type -q yay
+        set -g SUMMARY_YAY "already present"
+        return 0
+    end
+    info "Installing 'yay' (AUR helper)"
+    if not type -q git
+        if type -q sudo; and type -q pacman
+            sudo pacman -Sy --needed --noconfirm git; or begin
+                err "Failed to install 'git' via pacman"
+                return 1
+            end
+        else
+            err "Cannot install 'git' automatically (need sudo and pacman)"
+            return 1
+        end
+    end
+    if type -q sudo; and type -q pacman
+        sudo pacman -Sy --needed --noconfirm base-devel; or begin
+            err "Failed to install 'base-devel' via pacman"
+            return 1
+        end
+    else
+        err "Cannot install 'base-devel' automatically (need sudo and pacman)"
+        return 1
+    end
+    set -l builddir (mktemp -d)
+    if test -z "$builddir"
+        err "Failed to create temporary build directory"
+        return 1
+    end
+    info "Cloning yay-bin AUR into $builddir"
+    git clone https://aur.archlinux.org/yay-bin.git "$builddir/yay-bin"; or begin
+        err "Failed to clone yay-bin from AUR"
+        return 1
+    end
+    pushd "$builddir/yay-bin" >/dev/null
+    info "Building and installing yay"
+    makepkg -si --noconfirm; or begin
+        popd >/dev/null
+        err "Failed to build/install yay"
+        return 1
+    end
+    popd >/dev/null
+    rm -rf -- "$builddir"
+    set -g SUMMARY_YAY "installed"
+end
+
 # Resolve repo root and sources robustly
 set -l repo_root ""
 set -l tmpdir ""
+set -l summary_repo_source ""
 
 if set -q REPO_SRC; and test -d "$REPO_SRC"
     set repo_root "$REPO_SRC"
     info "Using REPO_SRC=$repo_root"
+    set summary_repo_source "local repository (REPO_SRC)"
 else if test -d "$PWD/wallpapers"; or test -d "$PWD/.config/caelestia"
     set repo_root "$PWD"
     info "Using repo root at: $repo_root"
+    set summary_repo_source "local repository (PWD)"
 else
     # Try script directory as a last resort
     set -l script_path (status -f)
@@ -45,6 +97,7 @@ else
         if test -d "$script_dir/wallpapers"; or test -d "$script_dir/.config/caelestia"
             set repo_root "$script_dir"
             info "Using script-adjacent repo root at: $repo_root"
+            set summary_repo_source "local repository (script dir)"
         end
     end
 end
@@ -76,6 +129,7 @@ if test -z "$repo_root"
         err "Failed to clone repository"
         exit 1
     end
+    set summary_repo_source "cloned repository to temporary directory"
 end
 
 # Determine sources for each component
@@ -99,6 +153,8 @@ else if test -n "$repo_root"; and test -d "$repo_root/.config/caelestia"
 end
 
 set -l did_anything 0
+set -l summary_wallpapers "skipped"
+set -l summary_caelestia "skipped"
 
 # Wallpapers copy
 if test -n "$wallpapers_src"
@@ -119,6 +175,7 @@ if test -n "$wallpapers_src"
         exit 1
     end
     log "Wallpapers are in place at $target_wp"
+    set summary_wallpapers "copied to $target_wp"
     set did_anything 1
 else
     warn "No wallpapers source found; skipping"
@@ -143,14 +200,66 @@ if test -n "$caelestia_src"
         exit 1
     end
     log "Caelestia config is in place at $target_c (overwritten)"
+    set summary_caelestia "overwritten in $target_c"
     set did_anything 1
 else
     warn "No Caelestia source found; skipping"
 end
 
 if test $did_anything -eq 0
-    err "Nothing to do: no sources found."
+    warn "No file sources found; continuing to package setup."
+end
+
+# Install default applications via yay (if missing)
+info "Ensuring default applications are installed via yay"
+set -g SUMMARY_YAY "already present"
+ensure_yay; or begin
+    err "'yay' is required to install default applications"
     exit 1
+end
+
+set -l default_pkgs 1password-beta google-chrome obs-studio termius
+set -l pkgs_installed
+set -l pkgs_present
+set -l pkgs_failed
+for p in $default_pkgs
+    if pacman -Qi -- $p >/dev/null 2>/dev/null
+        log "$p is already installed"
+        set pkgs_present $pkgs_present $p
+    else
+        info "Installing $p via yay"
+        if yay -S --needed --noconfirm -- $p
+            set pkgs_installed $pkgs_installed $p
+        else
+            err "Failed to install $p"
+            set pkgs_failed $pkgs_failed $p
+        end
+    end
+end
+
+# Print status summary
+echo
+echo (set_color bryellow)'=== Summary ==='(set_color normal)
+if test -n "$summary_repo_source"
+    echo "- Repo source: $summary_repo_source"
+end
+echo "- Wallpapers:  $summary_wallpapers"
+echo "- Caelestia:   $summary_caelestia"
+echo "- yay:         $SUMMARY_YAY"
+
+set -l join_installed (string join ", " $pkgs_installed)
+set -l join_present (string join ", " $pkgs_present)
+set -l join_failed (string join ", " $pkgs_failed)
+if test -n "$join_installed"
+    echo "- Apps installed: $join_installed"
+else
+    echo "- Apps installed: (none)"
+end
+if test -n "$join_present"
+    echo "- Apps already present: $join_present"
+end
+if test -n "$join_failed"
+    echo "- Apps failed: $join_failed"
 end
 
 # Cleanup temp directory if used
