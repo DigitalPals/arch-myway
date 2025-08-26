@@ -66,22 +66,26 @@ function ensure_brew
         err "bash not found; please install bash and re-run"
         return 1
     end
-    # Run official installer
-    bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"; or begin
+    # Run official installer (pipe into bash; fish doesn't support $() )
+    curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh | bash; or begin
         err "Homebrew installation failed"
         return 1
     end
-    # Load brew into current session (Linux default path)
-    if test -x /home/linuxbrew/.linuxbrew/bin/brew
-        eval (/home/linuxbrew/.linuxbrew/bin/brew shellenv)
+    # Locate brew binary and load into current session
+    set -l brew_bin ""
+    if test -x $HOME/.linuxbrew/bin/brew
+        set brew_bin "$HOME/.linuxbrew/bin/brew"
+    else if test -x /home/linuxbrew/.linuxbrew/bin/brew
+        set brew_bin "/home/linuxbrew/.linuxbrew/bin/brew"
     else if test -x /opt/homebrew/bin/brew
-        eval (/opt/homebrew/bin/brew shellenv)
+        set brew_bin "/opt/homebrew/bin/brew"
     end
-    # Persist into fish config
-    set -l fish_cfg "$HOME/.config/fish/config.fish"
-    set -l brew_shellenv_line 'eval (/home/linuxbrew/.linuxbrew/bin/brew shellenv)'
-    if test -x /home/linuxbrew/.linuxbrew/bin/brew
+    if test -n "$brew_bin"
+        eval ($brew_bin shellenv)
+        # Persist into fish config
+        set -l fish_cfg "$HOME/.config/fish/config.fish"
         if not test -f "$fish_cfg"; mkdir -p (dirname "$fish_cfg"); touch "$fish_cfg"; end
+        set -l brew_shellenv_line "eval ($brew_bin shellenv)"
         if not grep -q "$brew_shellenv_line" "$fish_cfg" 2>/dev/null
             echo "$brew_shellenv_line" >> "$fish_cfg"
         end
@@ -153,22 +157,16 @@ if test -z "$repo_root"
     exit 1
 end
 
-# Determine sources for each component
+# Determine sources for each component from local repo only
 set -l wallpapers_src ""
 set -l caelestia_src ""
 
-if set -q WALLPAPER_SRC; and test -d "$WALLPAPER_SRC"
-    set wallpapers_src "$WALLPAPER_SRC"
-    info "Using WALLPAPER_SRC=$wallpapers_src"
-else if test -n "$repo_root"; and test -d "$repo_root/wallpapers"
+if test -n "$repo_root"; and test -d "$repo_root/wallpapers"
     set wallpapers_src "$repo_root/wallpapers"
     info "Wallpapers source: $wallpapers_src"
 end
 
-if set -q CAELESTIA_SRC; and test -d "$CAELESTIA_SRC"
-    set caelestia_src "$CAELESTIA_SRC"
-    info "Using CAELESTIA_SRC=$caelestia_src"
-else if test -n "$repo_root"; and test -d "$repo_root/.config/caelestia"
+if test -n "$repo_root"; and test -d "$repo_root/.config/caelestia"
     set caelestia_src "$repo_root/.config/caelestia"
     info "Caelestia source: $caelestia_src"
 end
@@ -250,11 +248,9 @@ else
     end
 end
 
-# Source for cybex theme
+# Source for cybex theme (local repo only)
 set -l plymouth_theme_src ""
-if set -q PLYMOUTH_THEME_SRC; and test -d "$PLYMOUTH_THEME_SRC"
-    set plymouth_theme_src "$PLYMOUTH_THEME_SRC"
-else if test -n "$repo_root"; and test -d "$repo_root/plymouth/themes/cybex"
+if test -n "$repo_root"; and test -d "$repo_root/plymouth/themes/cybex"
     set plymouth_theme_src "$repo_root/plymouth/themes/cybex"
 end
 
