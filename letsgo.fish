@@ -25,8 +25,10 @@ end
 # Pause helper for debugging (only when interactive)
 function pause_section -a title
     if test -z "$NO_PAUSE"
-        set -l prompt "[PAUSE] $title — press Enter to continue"
-        read -P "$prompt" -l _
+        if status is-interactive
+            set -l pause_enter ""
+            read -P "[PAUSE] $title — press Enter to continue" -l pause_enter
+        end
     end
 end
 
@@ -293,7 +295,7 @@ else
     warn "No Plymouth theme source found; skipping theme install"
 end
 
-"# Ensure mkinitcpio has the plymouth hook and rebuild initramfs"
+# Ensure mkinitcpio has the plymouth hook and rebuild initramfs
 set -l mkconf "/etc/mkinitcpio.conf"
 if not type -q sudo
     warn "sudo not available; skipping mkinitcpio hook update"
