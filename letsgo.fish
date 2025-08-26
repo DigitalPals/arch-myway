@@ -180,6 +180,9 @@ set -l summary_plymouth_hook "unchanged"
 set -l summary_initramfs "skipped"
 set -l summary_kernel_params "unchanged"
 set -l summary_bootloader_update "skipped"
+set -l summary_hyprland_pkg "skipped"
+set -l summary_autologin "skipped"
+set -l summary_hypr_autostart "skipped"
 
 # Wallpapers copy
 if test -n "$wallpapers_src"
@@ -333,6 +336,64 @@ if test -r $mkconf
     end
 else
     warn "Cannot read $mkconf to verify plymouth hook"
+end
+
+# Hyprland: install, enable TTY1 autologin, and autostart on login
+if pacman -Qi -- hyprland >/dev/null 2>/dev/null
+    set summary_hyprland_pkg "already installed"
+else
+    info "Installing hyprland"
+    if ensure_pacman_packages hyprland
+        set summary_hyprland_pkg "installed"
+    else
+        err "Failed to install hyprland"
+        set summary_hyprland_pkg "install failed"
+    end
+end
+
+# Configure autologin on TTY1 via systemd getty override
+set -l current_user (whoami)
+if test -n "$current_user"
+    set -l dropin_dir "/etc/systemd/system/getty@tty1.service.d"
+    set -l override_path "$dropin_dir/override.conf"
+    if type -q sudo
+        set -l tmpf (mktemp)
+        if test -z "$tmpf"
+            err "Failed to create temporary file for getty override"
+        else
+            mkdir -p (dirname $tmpf) >/dev/null 2>&1
+            printf "[Service]\nExecStart=\nExecStart=-/usr/bin/agetty --autologin %s --noclear %%I $TERM\n" "$current_user" | sudo tee $tmpf >/dev/null
+            if sudo mkdir -p -- "$dropin_dir"; and sudo mv "$tmpf" "$override_path"
+                sudo systemctl daemon-reload >/dev/null 2>&1
+                sudo systemctl enable getty@tty1.service >/dev/null 2>&1
+                set summary_autologin "configured for $current_user"
+            else
+                err "Failed to write $override_path"
+                set summary_autologin "failed"
+            end
+        end
+    else
+        warn "sudo not available; cannot configure autologin"
+        set summary_autologin "skipped"
+    end
+end
+
+# Add Hyprland autostart to fish login on TTY1
+set -l fish_cfg "$HOME/.config/fish/config.fish"
+set -l hypr_marker "arch-myway autostart"
+set -l hypr_snip "# --- autostart Hyprland on tty1 ($hypr_marker) ---\nif status is-login\n    if test (tty) = \"/dev/tty1\"\n        if type -q Hyprland\n            exec Hyprland\n        end\n    end\nend\n# --- end $hypr_marker ---\n"
+if not test -f "$fish_cfg"
+    mkdir -p (dirname "$fish_cfg"); and touch "$fish_cfg"
+end
+if grep -q "$hypr_marker" "$fish_cfg" 2>/dev/null
+    set summary_hypr_autostart "already present"
+else
+    if printf "%s" "$hypr_snip" >> "$fish_cfg"
+        set summary_hypr_autostart "configured"
+    else
+        set summary_hypr_autostart "failed"
+        err "Failed to append Hyprland autostart to $fish_cfg"
+    end
 end
 
 # Rebuild initramfs if plymouth hook was added or plymouth theme was set
@@ -554,6 +615,7 @@ if test -n "$join_failed"
 end
 echo "- Plymouth:    pkg=$summary_plymouth_pkg, theme=$summary_plymouth_theme, hook=$summary_plymouth_hook, initramfs=$summary_initramfs"
 echo "- Kernel:      params=$summary_kernel_params, bootloader_update=$summary_bootloader_update"
+echo "- Hyprland:    pkg=$summary_hyprland_pkg, autologin=$summary_autologin, autostart=$summary_hypr_autostart"
 
 # Derive overall Plymouth readiness status
 set -l missing

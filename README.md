@@ -16,6 +16,7 @@ What it does
 - Creates target directories if missing.
 - Installs Plymouth and applies the Cybex theme, updates mkinitcpio hooks, rebuilds initramfs, and adds `quiet splash` to kernel params (GRUB/systemd-boot).
 - Installs Homebrew (Linuxbrew), updates fish PATH, and attempts to install `codex` and `claude-code` via brew if available.
+ - Enables TTY1 autologin for your user and auto-starts Hyprland on login (no display manager required).
 
 Rules
 - Do not run as root.
