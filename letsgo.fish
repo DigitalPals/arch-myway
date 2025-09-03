@@ -1160,7 +1160,7 @@ switch $summary_plymouth_pkg
         set missing $missing pkg
 end
 switch $summary_plymouth_theme
-    case 'installed*' 'installed and set as default'
+    case 'installed*' 'installed and set as default' 'already present'
     case '*'
         set missing $missing theme
 end
