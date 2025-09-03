@@ -250,6 +250,12 @@ set -l summary_hypr_autostart "skipped"
 set -l did_theme_rebuild 0
 set -l summary_file_manager_pkg "skipped"
 set -l summary_file_manager_default "unchanged"
+set -l summary_snapper_pkg "skipped"
+set -l summary_snapper_config "skipped"
+set -l summary_snapper_hooks "skipped"
+set -l summary_snapshots_mount "unchanged"
+set -l summary_snapshots_boot "skipped"
+set -l summary_snapshots_limit "unchanged"
 
 # Wallpapers copy
 if test -n "$wallpapers_src"
@@ -742,6 +748,227 @@ end
 
 ## (pause removed)
 
+# Snapper + snapshots on upgrades + boot integration
+info "Configuring snapper for root snapshots on pacman/yay upgrades"
+
+# Root FS must be btrfs
+set -l root_fstype (findmnt -n -o FSTYPE / 2>/dev/null)
+if test "$root_fstype" != btrfs
+    warn "Root filesystem is not btrfs; skipping snapper setup"
+else
+    # Ensure required packages
+    if ensure_pacman_packages snapper snap-pac btrfs-progs inotify-tools
+        set summary_snapper_pkg "installed/ok"
+    else
+        if is_installed_pacman snapper; and is_installed_pacman snap-pac
+            set summary_snapper_pkg "already installed"
+        else
+            err "Failed to install snapper dependencies"
+        end
+    end
+
+    # Create root config if missing
+    if not test -r /etc/snapper/configs/root
+        info "Creating snapper root config"
+        if type -q sudo; and sudo snapper -c root create-config /
+            set summary_snapper_config "created"
+        else
+            err "Failed to create snapper root config"
+        end
+    else
+        set summary_snapper_config "already exists"
+    end
+
+    # Ensure /.snapshots is mounted (snapper create-config creates the subvolume)
+    if not findmnt -r /.snapshots >/dev/null 2>&1
+        # Derive root filesystem UUID and subvolume to mount correct snapshots path
+        set -l root_uuid (findmnt -n -o UUID / 2>/dev/null)
+        # Determine current root subvol path (if any)
+        set -l root_opts (findmnt -n -o OPTIONS / 2>/dev/null)
+        set -l root_subvol ""
+        for opt in (string split , -- $root_opts)
+            if string match -q 'subvol=*' -- $opt
+                set root_subvol (string split -m1 = -- $opt)[2]
+            end
+        end
+        set -l snapshots_subvol ".snapshots"
+        if test -n "$root_subvol"; and test "$root_subvol" != "/"; and test "$root_subvol" != "."
+            set snapshots_subvol "$root_subvol/.snapshots"
+        end
+        if test -n "$root_uuid"
+            set -l fstab_line "UUID=$root_uuid /.snapshots btrfs rw,relatime,ssd,space_cache=v2,subvol=$snapshots_subvol 0 0"
+            if not grep -qsE '^[^#].*\s/\.snapshots\s' /etc/fstab 2>/dev/null
+                set -l tmpf (mktemp)
+                if test -n "$tmpf"
+                    cat /etc/fstab > $tmpf 2>/dev/null
+                    echo $fstab_line >> $tmpf
+                    if sudo install -m 644 $tmpf /etc/fstab
+                        mkdir -p /.snapshots 2>/dev/null
+                        if sudo mount /.snapshots
+                            set summary_snapshots_mount "mounted via fstab"
+                        else
+                            warn "fstab updated; mount of /.snapshots failed (check subvol name)"
+                            set summary_snapshots_mount "fstab updated"
+                        end
+                    else
+                        err "Failed to update /etc/fstab for /.snapshots"
+                    end
+                end
+            else
+                # fstab has an entry but not mounted yet; try mounting
+                if sudo mount /.snapshots
+                    set summary_snapshots_mount "mounted"
+                else
+                    warn "/.snapshots present in fstab but mount failed"
+                end
+            end
+        else
+            warn "Could not determine root UUID; skipping fstab entry for /.snapshots"
+        end
+    else
+        set summary_snapshots_mount "already mounted"
+    end
+
+    # Ensure pacman hooks (snap-pac) are present
+    if test -d /etc/pacman.d/hooks; and grep -Rsnq -- 'snap-pac' /etc/pacman.d/hooks >/dev/null 2>&1
+        set summary_snapper_hooks "already present"
+    else if test -d /usr/share/libalpm/hooks; and grep -Rsnq -- 'snap-pac' /usr/share/libalpm/hooks >/dev/null 2>&1
+        set summary_snapper_hooks "present (system)"
+    else
+        # snap-pac package should have installed hooks; warn if not found
+        warn "snap-pac hooks not detected; verify installation"
+        set summary_snapper_hooks "unknown"
+    end
+
+    # Configure snapper retention: hard cap and no timeline snapshots
+    if test -r /etc/snapper/configs/root
+        set -l cf /etc/snapper/configs/root
+        set -l tmpf (mktemp)
+        if test -n "$tmpf"
+            awk 'BEGIN{a=0;b=0;c=0;d=0;e=0}
+                /^\s*TIMELINE_CREATE/ {print "TIMELINE_CREATE=\"no\""; a=1; next}
+                /^\s*TIMELINE_CLEANUP/ {print "TIMELINE_CLEANUP=\"no\""; b=1; next}
+                /^\s*NUMBER_CLEANUP/ {print "NUMBER_CLEANUP=\"yes\""; c=1; next}
+                /^\s*NUMBER_LIMIT/ {print "NUMBER_LIMIT=5"; d=1; next}
+                /^\s*NUMBER_MIN_AGE/ {print "NUMBER_MIN_AGE=0"; e=1; next}
+                {print}
+                END{
+                    if(!a) print "TIMELINE_CREATE=\"no\"";
+                    if(!b) print "TIMELINE_CLEANUP=\"no\"";
+                    if(!c) print "NUMBER_CLEANUP=\"yes\"";
+                    if(!d) print "NUMBER_LIMIT=5";
+                    if(!e) print "NUMBER_MIN_AGE=0";
+                }' $cf > $tmpf
+            if sudo install -m 600 $tmpf $cf
+                if test "$summary_snapshots_limit" = "unchanged"
+                    set summary_snapshots_limit "snapper limit=5"
+                else
+                    set summary_snapshots_limit "$summary_snapshots_limit; snapper=5"
+                end
+            else
+                warn "Failed to update snapper config retention settings"
+            end
+        end
+    end
+
+    # Enable cleanup timer and ensure timeline timer is disabled
+    if type -q sudo; and type -q systemctl
+        sudo systemctl enable --now snapper-cleanup.timer >/dev/null 2>&1
+        sudo systemctl disable --now snapper-timeline.timer >/dev/null 2>&1
+    end
+
+    # Boot integration: GRUB (grub-btrfs) or systemd-boot (snapper-boot if available)
+    set -l using_grub 0
+    if test -r /etc/default/grub; or type -q grub-mkconfig
+        set using_grub 1
+    end
+
+    if test $using_grub -eq 1
+        # Install grub-btrfs from AUR and enable daemon to auto-regenerate menu
+        if ensure_yay; and ensure_yay_packages grub-btrfs
+            # Configure limit to 5 entries
+            set -l gb_conf "/etc/default/grub-btrfs/config"
+            # Ensure parent directory exists for config
+            if type -q sudo
+                sudo install -d -m 755 (dirname $gb_conf) >/dev/null 2>&1
+            end
+            if test -r $gb_conf
+                set -l tmpf (mktemp)
+                if test -n "$tmpf"
+                    awk 'BEGIN{set=0} /^#?\s*GRUB_BTRFS_LIMIT=/{print "GRUB_BTRFS_LIMIT=5"; set=1; next} {print} END{if(!set) print "GRUB_BTRFS_LIMIT=5"}' $gb_conf > $tmpf
+                    sudo install -m 644 $tmpf $gb_conf >/dev/null 2>&1
+                end
+            else
+                printf "GRUB_BTRFS_LIMIT=5\n" | sudo tee -a $gb_conf >/dev/null 2>&1
+            end
+            if test "$summary_snapshots_limit" = "unchanged"
+                set summary_snapshots_limit "grub limit=5"
+            else
+                set summary_snapshots_limit "$summary_snapshots_limit; grub=5"
+            end
+
+            if type -q sudo; and type -q systemctl
+                # Prefer path unit if present; else service
+                if systemctl list-unit-files | grep -q '^grub-btrfsd\.path';
+                    sudo systemctl enable --now grub-btrfsd.path >/dev/null 2>&1
+                else if systemctl list-unit-files | grep -q '^grub-btrfsd\.service';
+                    sudo systemctl enable --now grub-btrfsd.service >/dev/null 2>&1
+                end
+            end
+
+            # Generate grub.cfg once to include current snapshots
+            if type -q grub-mkconfig
+                info "Updating GRUB config to include snapshot entries"
+                if sudo grub-mkconfig -o /boot/grub/grub.cfg
+                    set summary_snapshots_boot "grub entries ready"
+                else
+                    warn "grub-mkconfig failed for snapshots"
+                end
+            else
+                warn "grub-mkconfig not found; snapshot entries will appear after next grub update"
+            end
+        else
+            warn "Failed to install grub-btrfs via yay"
+        end
+    else if test -d /boot/loader/entries
+        # systemd-boot: try to install snapper-boot from AUR if available
+        if ensure_yay; and ensure_yay_packages snapper-boot
+            # Try to set limit if a known config exists
+            set -l sb_conf ""
+            for c in /etc/snapper-boot.conf /etc/snapper-boot/config
+                if test -r $c
+                    set sb_conf $c
+                    break
+                end
+            end
+            if test -n "$sb_conf"
+                set -l tmpf (mktemp)
+                if test -n "$tmpf"
+                    awk 'BEGIN{set=0} /^#?\s*(LIMIT|MaxSnapshots|MAX_SNAPSHOTS|SNAPSHOT_LIMIT)=/{print "MAX_SNAPSHOTS=5"; set=1; next} {print} END{if(!set) print "MAX_SNAPSHOTS=5"}' $sb_conf > $tmpf
+                    sudo install -m 644 $tmpf $sb_conf >/dev/null 2>&1
+                    if test "$summary_snapshots_limit" = "unchanged"
+                        set summary_snapshots_limit "systemd-boot limit=5"
+                    else
+                        set summary_snapshots_limit "$summary_snapshots_limit; systemd-boot=5"
+                    end
+                end
+            end
+            if type -q sudo; and type -q systemctl
+                # Enable any snapper-boot units if present
+                for u in (systemctl list-unit-files | awk '/^snapper-boot.*\.(service|path|timer)/{print $1}')
+                    sudo systemctl enable --now $u >/dev/null 2>&1
+                end
+            end
+            set summary_snapshots_boot "systemd-boot entries ready (if supported)"
+        else
+            warn "systemd-boot detected; consider installing 'snapper-boot' to surface entries"
+            set summary_snapshots_boot "systemd-boot (manual)"
+        end
+    else
+        set summary_snapshots_boot "no supported bootloader detected"
+    end
+end
+
 # Install Homebrew and selected brew packages
 info "Ensuring Homebrew (brew) is installed"
 set -g SUMMARY_BREW "already present"
@@ -819,6 +1046,7 @@ echo "- Plymouth:    pkg=$summary_plymouth_pkg, theme=$summary_plymouth_theme, h
 echo "- Kernel:      params=$summary_kernel_params, bootloader_update=$summary_bootloader_update"
 echo "- Hyprland:    pkg=$summary_hyprland_pkg, autologin=$summary_autologin, autostart=$summary_hypr_autostart"
 echo "- FileMgr:     pkg=$summary_file_manager_pkg, default=$summary_file_manager_default"
+echo "- Snapper:     pkg=$summary_snapper_pkg, config=$summary_snapper_config, hooks=$summary_snapper_hooks, mount=$summary_snapshots_mount, boot=$summary_snapshots_boot, limit=$summary_snapshots_limit"
 
 # Derive overall Plymouth readiness status
 set -l missing
