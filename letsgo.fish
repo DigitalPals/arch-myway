@@ -478,26 +478,28 @@ else
             end
         end
         
-        # Check if plymouth was already in the correct position
-        set -l already_correct 0
-        if test (count $tokens_clean) = (count $tokens_new)
-            set -l all_match 1
-            for i in (seq 1 (count $tokens_clean))
+        # Check if we need to make changes
+        # Compare the new arrangement with the original to see if they're the same
+        set -l needs_update 0
+        
+        # First check if counts differ
+        if test (count $tokens) -ne (count $tokens_new)
+            set needs_update 1
+        else
+            # Compare each token
+            for i in (seq 1 (count $tokens))
                 set -l clean_old (string replace -a '"' '' -- $tokens[$i])
                 set clean_old (string replace -a "'" '' -- $clean_old)
                 set -l clean_new (string replace -a '"' '' -- $tokens_new[$i])
                 set clean_new (string replace -a "'" '' -- $clean_new)
                 if test "$clean_old" != "$clean_new"
-                    set all_match 0
+                    set needs_update 1
                     break
                 end
             end
-            if test $all_match -eq 1
-                set already_correct 1
-            end
         end
         
-        if test $already_correct -eq 1
+        if test $needs_update -eq 0
             set summary_plymouth_hook "already present"
         else
             set -l new_hooks_line "HOOKS=("(string join ' ' $tokens_new)")"
