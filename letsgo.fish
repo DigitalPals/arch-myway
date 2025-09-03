@@ -406,6 +406,13 @@ else
     set -l hooks_inner (sed -n -E 's/^[[:space:]]*HOOKS=\(([^)]*)\).*$/\1/p' $mkconf | head -n1)
     if test -n "$hooks_inner"
         set -l tokens $hooks_inner
+        
+        # Debug output
+        if test "$DEBUG" = "1"
+            echo "DEBUG: Original HOOKS content: $hooks_inner"
+            echo "DEBUG: Token count: "(count $tokens)
+            echo "DEBUG: Tokens: $tokens"
+        end
         # Normalize tokens by stripping quotes for matching, but keep original tokens for output
         set -l tokens_clean
         for t in $tokens
@@ -416,10 +423,19 @@ else
         
         # First, remove all existing plymouth hooks
         set -l tokens_without_plymouth
+        set -l plymouth_count 0
         for i in (seq 1 (count $tokens))
-            if test "$tokens_clean[$i]" != plymouth
+            if test "$tokens_clean[$i]" = plymouth
+                set plymouth_count (math $plymouth_count + 1)
+            else
                 set tokens_without_plymouth $tokens_without_plymouth $tokens[$i]
             end
+        end
+        
+        # Debug output
+        if test "$DEBUG" = "1"
+            echo "DEBUG: Found $plymouth_count plymouth entries in original HOOKS"
+            echo "DEBUG: Tokens without plymouth: $tokens_without_plymouth"
         end
         
         # Now find where to insert plymouth (after udev)
@@ -443,8 +459,13 @@ else
         end
         
         if test $idx_udev -gt 0
-            # Insert plymouth after udev
-            set tokens_new $tokens_without_plymouth[1..$idx_udev] plymouth $tokens_without_plymouth[(math $idx_udev + 1)..-1]
+            # Insert plymouth after udev  
+            if test $idx_udev -lt (count $tokens_without_plymouth)
+                set tokens_new $tokens_without_plymouth[1..$idx_udev] plymouth $tokens_without_plymouth[(math $idx_udev + 1)..-1]
+            else
+                # udev is the last item
+                set tokens_new $tokens_without_plymouth plymouth
+            end
             set plymouth_added 1
         else
             # Try after systemd (systemd-based images)
@@ -456,7 +477,11 @@ else
                 end
             end
             if test $idx_systemd -gt 0
-                set tokens_new $tokens_without_plymouth[1..$idx_systemd] plymouth $tokens_without_plymouth[(math $idx_systemd + 1)..-1]
+                if test $idx_systemd -lt (count $tokens_without_plymouth)
+                    set tokens_new $tokens_without_plymouth[1..$idx_systemd] plymouth $tokens_without_plymouth[(math $idx_systemd + 1)..-1]
+                else
+                    set tokens_new $tokens_without_plymouth plymouth
+                end
                 set plymouth_added 1
             else
                 # Try after base
@@ -468,7 +493,11 @@ else
                     end
                 end
                 if test $idx_base -gt 0
-                    set tokens_new $tokens_without_plymouth[1..$idx_base] plymouth $tokens_without_plymouth[(math $idx_base + 1)..-1]
+                    if test $idx_base -lt (count $tokens_without_plymouth)
+                        set tokens_new $tokens_without_plymouth[1..$idx_base] plymouth $tokens_without_plymouth[(math $idx_base + 1)..-1]
+                    else
+                        set tokens_new $tokens_without_plymouth plymouth
+                    end
                     set plymouth_added 1
                 else
                     # Append to end as safe fallback
@@ -499,15 +528,47 @@ else
             end
         end
         
-        if test $needs_update -eq 0
+        # Final sanity check - count plymouth entries in the new array
+        set -l final_plymouth_count 0
+        for t in $tokens_new
+            set -l clean (string replace -a '"' '' -- $t)
+            set clean (string replace -a "'" '' -- $clean)
+            if test "$clean" = plymouth
+                set final_plymouth_count (math $final_plymouth_count + 1)
+            end
+        end
+        
+        if test $final_plymouth_count -ne 1
+            err "ERROR: Final HOOKS array has $final_plymouth_count plymouth entries instead of 1!"
+            err "This is a bug in the script. Tokens: $tokens_new"
+            set summary_plymouth_hook "error"
+        else if test $needs_update -eq 0
             set summary_plymouth_hook "already present"
         else
             set -l new_hooks_line "HOOKS=("(string join ' ' $tokens_new)")"
+            
+            # Debug output
+            if test "$DEBUG" = "1"
+                echo "DEBUG: New token count: "(count $tokens_new)
+                echo "DEBUG: New tokens: $tokens_new"
+                echo "DEBUG: New HOOKS line: $new_hooks_line"
+            end
             set -l tmpconf (mktemp)
             if test -z "$tmpconf"
                 err "Failed to create temporary file for mkinitcpio.conf"
             else
-                awk -v new="$new_hooks_line" 'BEGIN{done=0} /^[[:space:]]*HOOKS=/{print new; done=1; next} {print} END{if(!done) exit 1}' $mkconf > $tmpconf
+                # Use awk to replace the HOOKS line
+                # This matches any line starting with optional whitespace followed by HOOKS=
+                awk -v new="$new_hooks_line" '
+                    BEGIN { found=0 }
+                    /^[[:space:]]*HOOKS=\(/ {
+                        print new
+                        found=1
+                        next
+                    }
+                    { print }
+                    END { if(!found) exit 1 }
+                ' $mkconf > $tmpconf
                 if test $status -eq 0
                     if sudo install -m 644 $tmpconf $mkconf
                         set summary_plymouth_hook "added"
