@@ -256,6 +256,8 @@ set -l summary_snapper_hooks "skipped"
 set -l summary_snapshots_mount "unchanged"
 set -l summary_snapshots_boot "skipped"
 set -l summary_snapshots_limit "unchanged"
+set -l summary_snapper_initramfs "unchanged"
+set -l summary_snapper_initramfs_verify "skipped"
 
 # Wallpapers copy
 if test -n "$wallpapers_src"
@@ -1014,7 +1016,14 @@ else
                                     if sudo install -m 644 $tmpc $mkc
                                         if type -q mkinitcpio
                                             info "Rebuilding initramfs for snapper-boot overlay (mkinitcpio -P)"
-                                            sudo mkinitcpio -P >/dev/null 2>&1; or warn "mkinitcpio rebuild failed (snapper-boot)"
+                                            if sudo mkinitcpio -P
+                                                set summary_snapper_initramfs "rebuilt"
+                                            else
+                                                warn "mkinitcpio rebuild failed (snapper-boot)"
+                                                set summary_snapper_initramfs "rebuild failed"
+                                            end
+                                        else
+                                            set summary_snapper_initramfs "updated (no rebuild)"
                                         end
                                     else
                                         warn "Failed to write $mkc for snapper-boot hook"
@@ -1035,9 +1044,9 @@ else
     else
         set summary_snapshots_boot "no supported bootloader detected"
     end
-end
-
-# Install Homebrew and selected brew packages
+    end
+    
+    # Install Homebrew and selected brew packages
 info "Ensuring Homebrew (brew) is installed"
 set -g SUMMARY_BREW "already present"
 ensure_brew; or begin
@@ -1114,7 +1123,7 @@ echo "- Plymouth:    pkg=$summary_plymouth_pkg, theme=$summary_plymouth_theme, h
 echo "- Kernel:      params=$summary_kernel_params, bootloader_update=$summary_bootloader_update"
 echo "- Hyprland:    pkg=$summary_hyprland_pkg, autologin=$summary_autologin, autostart=$summary_hypr_autostart"
 echo "- FileMgr:     pkg=$summary_file_manager_pkg, default=$summary_file_manager_default"
-echo "- Snapper:     pkg=$summary_snapper_pkg, config=$summary_snapper_config, hooks=$summary_snapper_hooks, mount=$summary_snapshots_mount, boot=$summary_snapshots_boot, limit=$summary_snapshots_limit"
+echo "- Snapper:     pkg=$summary_snapper_pkg, config=$summary_snapper_config, hooks=$summary_snapper_hooks, mount=$summary_snapshots_mount, boot=$summary_snapshots_boot, limit=$summary_snapshots_limit, initramfs=$summary_snapper_initramfs, verify=$summary_snapper_initramfs_verify"
 
 # Derive overall Plymouth readiness status
 set -l missing
@@ -1193,3 +1202,29 @@ if type -q brew
 end
 
 # No temporary directories to cleanup (local-only mode)
+
+# Verify snapper-boot hook presence in active initramfs (systemd-boot path)
+set -l verify_hook ""
+if test -r /usr/lib/initcpio/hooks/snapper-boot; and test -r /usr/lib/initcpio/install/snapper-boot
+    set verify_hook "snapper-boot"
+else if test -r /usr/lib/initcpio/hooks/snapper; and test -r /usr/lib/initcpio/install/snapper
+    set verify_hook "snapper"
+end
+if type -q lsinitcpio; and test -n "$verify_hook"
+    set -l images (ls /boot/initramfs*.img 2>/dev/null)
+    if test (count $images) -gt 0
+        set -l found 0
+        for img in $images
+            if lsinitcpio -a $img 2>/dev/null | grep -qs "/usr/lib/initcpio/hooks/$verify_hook"
+                set summary_snapper_initramfs_verify "present in "(basename $img)
+                set found 1
+                break
+            end
+        end
+        if test $found -eq 0
+            set summary_snapper_initramfs_verify "not present"
+        end
+    else
+        set summary_snapper_initramfs_verify "no images"
+    end
+end
