@@ -405,7 +405,8 @@ else
     # Extract HOOKS inner content, ignoring leading whitespace and trailing comments
     set -l hooks_inner (sed -n -E 's/^[[:space:]]*HOOKS=\(([^)]*)\).*$/\1/p' $mkconf | head -n1)
     if test -n "$hooks_inner"
-        set -l tokens $hooks_inner
+        # IMPORTANT: Split the string into tokens on whitespace
+        set -l tokens (string split ' ' -- $hooks_inner)
         
         # Debug output
         if test "$DEBUG" = "1"
