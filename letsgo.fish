@@ -413,47 +413,93 @@ else
             set q (string replace -a "'" '' -- $q)
             set tokens_clean $tokens_clean $q
         end
-        if contains -- plymouth $tokens_clean
-            set summary_plymouth_hook "already present"
+        
+        # First, remove all existing plymouth hooks
+        set -l tokens_without_plymouth
+        for i in (seq 1 (count $tokens))
+            if test "$tokens_clean[$i]" != plymouth
+                set tokens_without_plymouth $tokens_without_plymouth $tokens[$i]
+            end
+        end
+        
+        # Now find where to insert plymouth (after udev)
+        set -l tokens_new
+        set -l plymouth_added 0
+        set -l idx_udev 0
+        
+        # Find udev position in the cleaned list (without plymouth)
+        set -l tokens_without_plymouth_clean
+        for t in $tokens_without_plymouth
+            set -l q (string replace -a '"' '' -- $t)
+            set q (string replace -a "'" '' -- $q)
+            set tokens_without_plymouth_clean $tokens_without_plymouth_clean $q
+        end
+        
+        for i in (seq 1 (count $tokens_without_plymouth_clean))
+            if test "$tokens_without_plymouth_clean[$i]" = udev
+                set idx_udev $i
+                break
+            end
+        end
+        
+        if test $idx_udev -gt 0
+            # Insert plymouth after udev
+            set tokens_new $tokens_without_plymouth[1..$idx_udev] plymouth $tokens_without_plymouth[(math $idx_udev + 1)..-1]
+            set plymouth_added 1
         else
-            set -l idx_udev 0
-            for i in (seq 1 (count $tokens_clean))
-                if test $tokens_clean[$i] = udev
-                    set idx_udev $i
+            # Try after systemd (systemd-based images)
+            set -l idx_systemd 0
+            for i in (seq 1 (count $tokens_without_plymouth_clean))
+                if test "$tokens_without_plymouth_clean[$i]" = systemd
+                    set idx_systemd $i
                     break
                 end
             end
-            set -l tokens_new
-            if test $idx_udev -gt 0
-                set tokens_new $tokens[1..$idx_udev] plymouth $tokens[(math $idx_udev + 1)..-1]
+            if test $idx_systemd -gt 0
+                set tokens_new $tokens_without_plymouth[1..$idx_systemd] plymouth $tokens_without_plymouth[(math $idx_systemd + 1)..-1]
+                set plymouth_added 1
             else
-                # Try after systemd (systemd-based images)
-                set -l idx_systemd 0
-                for i in (seq 1 (count $tokens_clean))
-                    if test $tokens_clean[$i] = systemd
-                        set idx_systemd $i
+                # Try after base
+                set -l idx_base 0
+                for i in (seq 1 (count $tokens_without_plymouth_clean))
+                    if test "$tokens_without_plymouth_clean[$i]" = base
+                        set idx_base $i
                         break
                     end
                 end
-                if test $idx_systemd -gt 0
-                    set tokens_new $tokens[1..$idx_systemd] plymouth $tokens[(math $idx_systemd + 1)..-1]
+                if test $idx_base -gt 0
+                    set tokens_new $tokens_without_plymouth[1..$idx_base] plymouth $tokens_without_plymouth[(math $idx_base + 1)..-1]
+                    set plymouth_added 1
                 else
-                    # Try after base
-                    set -l idx_base 0
-                    for i in (seq 1 (count $tokens_clean))
-                        if test $tokens_clean[$i] = base
-                            set idx_base $i
-                            break
-                        end
-                    end
-                    if test $idx_base -gt 0
-                        set tokens_new $tokens[1..$idx_base] plymouth $tokens[(math $idx_base + 1)..-1]
-                    else
-                        # Append to end as safe fallback
-                        set tokens_new $tokens plymouth
-                    end
+                    # Append to end as safe fallback
+                    set tokens_new $tokens_without_plymouth plymouth
+                    set plymouth_added 1
                 end
             end
+        end
+        
+        # Check if plymouth was already in the correct position
+        set -l already_correct 0
+        if test (count $tokens_clean) = (count $tokens_new)
+            set -l all_match 1
+            for i in (seq 1 (count $tokens_clean))
+                set -l clean_old (string replace -a '"' '' -- $tokens[$i])
+                set clean_old (string replace -a "'" '' -- $clean_old)
+                set -l clean_new (string replace -a '"' '' -- $tokens_new[$i])
+                set clean_new (string replace -a "'" '' -- $clean_new)
+                if test "$clean_old" != "$clean_new"
+                    set all_match 0
+                    break
+                end
+            end
+            if test $all_match -eq 1
+                set already_correct 1
+            end
+        end
+        
+        if test $already_correct -eq 1
+            set summary_plymouth_hook "already present"
+        else
             set -l new_hooks_line "HOOKS=("(string join ' ' $tokens_new)")"
             set -l tmpconf (mktemp)
             if test -z "$tmpconf"
@@ -469,6 +515,7 @@ else
                 else
                     warn "HOOKS= line not found or replace failed in $mkconf"
                 end
+                rm -f $tmpconf
             end
         end
     else
