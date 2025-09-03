@@ -895,11 +895,24 @@ else
             if test -r $gb_conf
                 set -l tmpf (mktemp)
                 if test -n "$tmpf"
-                    awk 'BEGIN{set=0} /^#?\s*GRUB_BTRFS_LIMIT=/{print "GRUB_BTRFS_LIMIT=5"; set=1; next} {print} END{if(!set) print "GRUB_BTRFS_LIMIT=5"}' $gb_conf > $tmpf
+                    # Ensure limit and enable snapshot boot with overlayfs (RW behavior)
+                    awk '
+                        BEGIN{limit=0; boot=0; overlay=0; addrw=0}
+                        /^#?\s*GRUB_BTRFS_LIMIT=/{print "GRUB_BTRFS_LIMIT=5"; limit=1; next}
+                        /^#?\s*GRUB_BTRFS_SNAPSHOT_BOOTING=/{print "GRUB_BTRFS_SNAPSHOT_BOOTING=\"true\""; boot=1; next}
+                        /^#?\s*GRUB_BTRFS_OVERLAYFS=/{print "GRUB_BTRFS_OVERLAYFS=\"true\""; overlay=1; next}
+                        /^#?\s*GRUB_BTRFS_ADD_LINUX_ROOTFLAGS=/{print "GRUB_BTRFS_ADD_LINUX_ROOTFLAGS=\"rw\""; addrw=1; next}
+                        {print}
+                        END{
+                            if(!limit) print "GRUB_BTRFS_LIMIT=5";
+                            if(!boot) print "GRUB_BTRFS_SNAPSHOT_BOOTING=\"true\"";
+                            if(!overlay) print "GRUB_BTRFS_OVERLAYFS=\"true\"";
+                            if(!addrw) print "GRUB_BTRFS_ADD_LINUX_ROOTFLAGS=\"rw\"";
+                        }' $gb_conf > $tmpf
                     sudo install -m 644 $tmpf $gb_conf >/dev/null 2>&1
                 end
             else
-                printf "GRUB_BTRFS_LIMIT=5\n" | sudo tee -a $gb_conf >/dev/null 2>&1
+                printf "GRUB_BTRFS_LIMIT=5\nGRUB_BTRFS_SNAPSHOT_BOOTING=\"true\"\nGRUB_BTRFS_OVERLAYFS=\"true\"\nGRUB_BTRFS_ADD_LINUX_ROOTFLAGS=\"rw\"\n" | sudo tee -a $gb_conf >/dev/null 2>&1
             end
             if test "$summary_snapshots_limit" = "unchanged"
                 set summary_snapshots_limit "grub limit=5"
