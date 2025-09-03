@@ -721,7 +721,7 @@ ensure_yay; or begin
     exit 1
 end
 
-set -l default_pkgs 1password-beta google-chrome obs-studio termius
+set -l default_pkgs 1password-beta google-chrome obs-studio termius uwsm
 set -l pkgs_installed
 set -l pkgs_present
 set -l pkgs_failed
