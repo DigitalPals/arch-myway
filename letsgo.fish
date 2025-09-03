@@ -946,99 +946,126 @@ else
             warn "Failed to install grub-btrfs via yay"
         end
     else if test -d /boot/loader/entries
-        # systemd-boot: try to install snapper-boot from AUR if available
-        if ensure_yay; and ensure_yay_packages snapper-boot
-            # Try to set limit if a known config exists
-            set -l sb_conf ""
-            for c in /etc/snapper-boot.conf /etc/snapper-boot/config
-                if test -r $c
-                    set sb_conf $c
-                    break
+        # systemd-boot: Create custom hook to generate boot entries for snapshots
+        info "Configuring systemd-boot for snapshot booting"
+        
+        # Create a pacman hook to update systemd-boot entries after snapshots
+        set -l hook_dir "/etc/pacman.d/hooks"
+        set -l hook_file "$hook_dir/95-systemd-boot-snapshots.hook"
+        
+        if type -q sudo
+            sudo mkdir -p $hook_dir 2>/dev/null
+            
+            # Create the hook file
+            set -l hook_content "[Trigger]
+Operation = Upgrade
+Operation = Install
+Operation = Remove
+Type = Package
+Target = *
+
+[Action]
+Description = Updating systemd-boot entries for snapshots
+When = PostTransaction
+Exec = /usr/local/bin/update-systemd-boot-snapshots.sh
+"
+            set -l tmpf (mktemp)
+            if test -n "$tmpf"
+                echo "$hook_content" > $tmpf
+                if sudo install -m 644 $tmpf $hook_file
+                    info "Created pacman hook for systemd-boot snapshot entries"
+                else
+                    warn "Failed to create pacman hook"
                 end
             end
-            if test -n "$sb_conf"
-                set -l tmpf (mktemp)
-                if test -n "$tmpf"
-                    awk 'BEGIN{set=0} /^#?\s*(LIMIT|MaxSnapshots|MAX_SNAPSHOTS|SNAPSHOT_LIMIT)=/{print "MAX_SNAPSHOTS=5"; set=1; next} {print} END{if(!set) print "MAX_SNAPSHOTS=5"}' $sb_conf > $tmpf
-                    sudo install -m 644 $tmpf $sb_conf >/dev/null 2>&1
-                    if test "$summary_snapshots_limit" = "unchanged"
-                        set summary_snapshots_limit "systemd-boot limit=5"
+            
+            # Create the script that generates boot entries for snapshots
+            set -l script_content '#!/bin/bash
+# Update systemd-boot entries for btrfs snapshots
+
+BOOT_DIR="/boot/loader/entries"
+SNAPSHOT_DIR="/.snapshots"
+MAX_ENTRIES=5
+
+# Check if running on btrfs with snapshots
+if [ ! -d "$SNAPSHOT_DIR" ]; then
+    exit 0
+fi
+
+# Remove old snapshot entries
+rm -f ${BOOT_DIR}/*-snapshot-*.conf 2>/dev/null
+
+# Get the current default entry as template
+DEFAULT_ENTRY=$(grep -l "^title.*Arch Linux$" ${BOOT_DIR}/*.conf 2>/dev/null | head -1)
+if [ -z "$DEFAULT_ENTRY" ]; then
+    DEFAULT_ENTRY=$(ls ${BOOT_DIR}/*.conf 2>/dev/null | head -1)
+fi
+
+if [ -z "$DEFAULT_ENTRY" ] || [ ! -f "$DEFAULT_ENTRY" ]; then
+    exit 0
+fi
+
+# Extract kernel and initrd info from default entry
+LINUX=$(grep "^linux" "$DEFAULT_ENTRY" | head -1)
+INITRD=$(grep "^initrd" "$DEFAULT_ENTRY")
+OPTIONS=$(grep "^options" "$DEFAULT_ENTRY" | head -1 | sed "s/^options //")
+
+# Get list of snapshots (newest first)
+SNAPSHOTS=$(ls -1dr ${SNAPSHOT_DIR}/*/info.xml 2>/dev/null | head -${MAX_ENTRIES})
+
+COUNT=0
+for INFO_FILE in $SNAPSHOTS; do
+    SNAPSHOT_NUM=$(basename $(dirname "$INFO_FILE"))
+    SNAPSHOT_PATH="/.snapshots/${SNAPSHOT_NUM}/snapshot"
+    
+    # Skip if not a valid number
+    if ! [[ "$SNAPSHOT_NUM" =~ ^[0-9]+$ ]]; then
+        continue
+    fi
+    
+    # Get snapshot description and date
+    DESC=$(grep "<description>" "$INFO_FILE" 2>/dev/null | sed "s/.*<description>\(.*\)<\/description>.*/\1/" | head -1)
+    DATE=$(grep "<date>" "$INFO_FILE" 2>/dev/null | sed "s/.*<date>\(.*\)<\/date>.*/\1/" | head -1 | cut -d"T" -f1)
+    
+    if [ -z "$DESC" ]; then
+        DESC="Snapshot ${SNAPSHOT_NUM}"
+    fi
+    
+    # Create new boot entry for this snapshot
+    ENTRY_FILE="${BOOT_DIR}/arch-snapshot-${SNAPSHOT_NUM}.conf"
+    
+    cat > "$ENTRY_FILE" << EOF
+title   Arch Linux (Snapshot ${SNAPSHOT_NUM} - ${DATE})
+${LINUX}
+${INITRD}
+options ${OPTIONS} rootflags=subvol=${SNAPSHOT_PATH}
+EOF
+    
+    COUNT=$((COUNT + 1))
+done
+
+echo "Created ${COUNT} snapshot boot entries"
+'
+            set -l script_file "/usr/local/bin/update-systemd-boot-snapshots.sh"
+            set -l tmpf2 (mktemp)
+            if test -n "$tmpf2"
+                echo "$script_content" > $tmpf2
+                if sudo install -m 755 $tmpf2 $script_file
+                    info "Created systemd-boot snapshot update script"
+                    # Run it once to create initial entries
+                    if sudo $script_file
+                        set summary_snapshots_boot "systemd-boot entries configured"
                     else
-                        set summary_snapshots_limit "$summary_snapshots_limit; systemd-boot=5"
+                        warn "Failed to generate initial snapshot entries"
+                        set summary_snapshots_boot "systemd-boot script created"
                     end
+                else
+                    warn "Failed to install snapshot update script"
+                    set summary_snapshots_boot "systemd-boot setup failed"
                 end
             end
-            if type -q sudo; and type -q systemctl
-                # Enable any snapper-boot units if present
-                for u in (systemctl list-unit-files | awk '/^snapper-boot.*\.(service|path|timer)/{print $1}')
-                    sudo systemctl enable --now $u >/dev/null 2>&1
-                end
-            end
-            # If snapper-boot mkinitcpio hook is available, ensure it is in HOOKS and rebuild initramfs
-            set -l snapboot_hook ""
-            if test -r /usr/lib/initcpio/hooks/snapper-boot; and test -r /usr/lib/initcpio/install/snapper-boot
-                set snapboot_hook "snapper-boot"
-            else if test -r /usr/lib/initcpio/hooks/snapper; and test -r /usr/lib/initcpio/install/snapper
-                # Fallback older naming
-                set snapboot_hook "snapper"
-            end
-            if test -n "$snapboot_hook"
-                set -l mkc "/etc/mkinitcpio.conf"
-                if test -r $mkc; and type -q sudo
-                    set -l hooks_inner (sed -n -E 's/^[[:space:]]*HOOKS=\(([^)]*)\).*$/\1/p' $mkc | head -n1)
-                    if test -n "$hooks_inner"
-                        set -l tokens $hooks_inner
-                        set -l tokens_clean
-                        for t in $tokens
-                            set -l q (string replace -a '"' '' -- $t)
-                            set q (string replace -a "'" '' -- $q)
-                            set tokens_clean $tokens_clean $q
-                        end
-                        if not contains -- $snapboot_hook $tokens_clean
-                            set -l idx_fs 0
-                            for i in (seq 1 (count $tokens_clean))
-                                if test $tokens_clean[$i] = filesystems
-                                    set idx_fs $i
-                                    break
-                                end
-                            end
-                            set -l tokens_new
-                            if test $idx_fs -gt 0
-                                set tokens_new $tokens[1..$idx_fs] $snapboot_hook $tokens[(math $idx_fs + 1)..-1]
-                            else
-                                set tokens_new $tokens $snapboot_hook
-                            end
-                            set -l new_hooks_line "HOOKS=("(string join ' ' $tokens_new)")"
-                            set -l tmpc (mktemp)
-                            if test -n "$tmpc"
-                                awk -v new="$new_hooks_line" 'BEGIN{done=0} /^[[:space:]]*HOOKS=/{print new; done=1; next} {print} END{if(!done) exit 1}' $mkc > $tmpc
-                                if test $status -eq 0
-                                    if sudo install -m 644 $tmpc $mkc
-                                        if type -q mkinitcpio
-                                            info "Rebuilding initramfs for snapper-boot overlay (mkinitcpio -P)"
-                                            if sudo mkinitcpio -P
-                                                set summary_snapper_initramfs "rebuilt"
-                                            else
-                                                warn "mkinitcpio rebuild failed (snapper-boot)"
-                                                set summary_snapper_initramfs "rebuild failed"
-                                            end
-                                        else
-                                            set summary_snapper_initramfs "updated (no rebuild)"
-                                        end
-                                    else
-                                        warn "Failed to write $mkc for snapper-boot hook"
-                                    end
-                                else
-                                    warn "HOOKS= line not found in $mkc (snapper-boot)"
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-            set summary_snapshots_boot "systemd-boot entries ready (if supported)"
         else
-            warn "systemd-boot detected; consider installing 'snapper-boot' to surface entries"
+            warn "sudo not available for systemd-boot setup"
             set summary_snapshots_boot "systemd-boot (manual)"
         end
     else
