@@ -954,7 +954,7 @@ else
         set -l hook_file "$hook_dir/95-systemd-boot-snapshots.hook"
         
         if type -q sudo
-            sudo mkdir -p $hook_dir 2>/dev/null
+            sudo -n mkdir -p $hook_dir 2>/dev/null
             
             # Create the hook file
             set -l hook_content "[Trigger]
@@ -972,7 +972,7 @@ Exec = /usr/local/bin/update-systemd-boot-snapshots.sh
             set -l tmpf (mktemp)
             if test -n "$tmpf"
                 echo "$hook_content" > $tmpf
-                if sudo install -m 644 $tmpf $hook_file
+                if sudo -n install -m 644 $tmpf $hook_file
                     info "Created pacman hook for systemd-boot snapshot entries"
                 else
                     warn "Failed to create pacman hook"
@@ -1050,10 +1050,10 @@ echo "Created ${COUNT} snapshot boot entries"
             set -l tmpf2 (mktemp)
             if test -n "$tmpf2"
                 echo "$script_content" > $tmpf2
-                if sudo install -m 755 $tmpf2 $script_file
+                if sudo -n install -m 755 $tmpf2 $script_file
                     info "Created systemd-boot snapshot update script"
                     # Run it once to create initial entries
-                    if sudo $script_file
+                    if sudo -n $script_file
                         set summary_snapshots_boot "systemd-boot entries configured"
                     else
                         warn "Failed to generate initial snapshot entries"
