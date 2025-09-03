@@ -972,6 +972,61 @@ else
                     sudo systemctl enable --now $u >/dev/null 2>&1
                 end
             end
+            # If snapper-boot mkinitcpio hook is available, ensure it is in HOOKS and rebuild initramfs
+            set -l snapboot_hook ""
+            if test -r /usr/lib/initcpio/hooks/snapper-boot; and test -r /usr/lib/initcpio/install/snapper-boot
+                set snapboot_hook "snapper-boot"
+            else if test -r /usr/lib/initcpio/hooks/snapper; and test -r /usr/lib/initcpio/install/snapper
+                # Fallback older naming
+                set snapboot_hook "snapper"
+            end
+            if test -n "$snapboot_hook"
+                set -l mkc "/etc/mkinitcpio.conf"
+                if test -r $mkc; and type -q sudo
+                    set -l hooks_inner (sed -n -E 's/^[[:space:]]*HOOKS=\(([^)]*)\).*$/\1/p' $mkc | head -n1)
+                    if test -n "$hooks_inner"
+                        set -l tokens $hooks_inner
+                        set -l tokens_clean
+                        for t in $tokens
+                            set -l q (string replace -a '"' '' -- $t)
+                            set q (string replace -a "'" '' -- $q)
+                            set tokens_clean $tokens_clean $q
+                        end
+                        if not contains -- $snapboot_hook $tokens_clean
+                            set -l idx_fs 0
+                            for i in (seq 1 (count $tokens_clean))
+                                if test $tokens_clean[$i] = filesystems
+                                    set idx_fs $i
+                                    break
+                                end
+                            end
+                            set -l tokens_new
+                            if test $idx_fs -gt 0
+                                set tokens_new $tokens[1..$idx_fs] $snapboot_hook $tokens[(math $idx_fs + 1)..-1]
+                            else
+                                set tokens_new $tokens $snapboot_hook
+                            end
+                            set -l new_hooks_line "HOOKS=("(string join ' ' $tokens_new)")"
+                            set -l tmpc (mktemp)
+                            if test -n "$tmpc"
+                                awk -v new="$new_hooks_line" 'BEGIN{done=0} /^[[:space:]]*HOOKS=/{print new; done=1; next} {print} END{if(!done) exit 1}' $mkc > $tmpc
+                                if test $status -eq 0
+                                    if sudo install -m 644 $tmpc $mkc
+                                        if type -q mkinitcpio
+                                            info "Rebuilding initramfs for snapper-boot overlay (mkinitcpio -P)"
+                                            sudo mkinitcpio -P >/dev/null 2>&1; or warn "mkinitcpio rebuild failed (snapper-boot)"
+                                        end
+                                    else
+                                        warn "Failed to write $mkc for snapper-boot hook"
+                                    end
+                                else
+                                    warn "HOOKS= line not found in $mkc (snapper-boot)"
+                                end
+                            end
+                        end
+                    end
+                end
+            end
             set summary_snapshots_boot "systemd-boot entries ready (if supported)"
         else
             warn "systemd-boot detected; consider installing 'snapper-boot' to surface entries"
