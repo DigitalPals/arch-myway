@@ -15,6 +15,7 @@ What it does
 - Copies Caelestia config into `~/.config/caelestia` (overwrites existing files).
 - Creates target directories if missing.
 - Installs Plymouth and applies the Cybex theme, updates mkinitcpio hooks, rebuilds initramfs, and adds `quiet splash` to kernel params (GRUB/systemd-boot).
+- Installs Nautilus and sets it as the default file manager for folders.
 - Installs Homebrew (Linuxbrew), updates fish PATH, and attempts to install `codex` and `claude-code` via brew if available.
  - Enables TTY1 autologin for your user and auto-starts Hyprland on login (no display manager required).
 

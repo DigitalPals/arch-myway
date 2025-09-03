@@ -35,18 +35,55 @@ function ensure_pacman_packages
     end
 end
 
-function copy_merge_no_overwrite -a src dst
-    if not test -d "$dst"
-        mkdir -p -- "$dst"; or return 1
-    end
-    cp -n -R -- "$src/." "$dst/"
+function is_installed_pacman -a pkg
+    pacman -Qi -- $pkg >/dev/null 2>/dev/null
 end
 
-function copy_overwrite -a src dst
+function ensure_yay_packages
+    # Usage: ensure_yay_packages pkg1 pkg2 ...
+    if type -q yay
+        yay -S --needed --noconfirm -- $argv
+        return $status
+    else
+        return 1
+    end
+end
+
+function copy_update_only -a src dst
     if not test -d "$dst"
         mkdir -p -- "$dst"; or return 1
     end
-    cp -R -f -- "$src/." "$dst/"
+    # Update only: copy when source is newer than destination
+    cp -R -u -- "$src/." "$dst/"
+end
+
+# Replace a block of text between exact marker lines with provided content
+function replace_block -a file start end content
+    set -l tmpout (mktemp)
+    set -l tmpc (mktemp)
+    if test -z "$tmpout"; or test -z "$tmpc"
+        return 1
+    end
+    if not test -f "$file"
+        mkdir -p (dirname "$file"); and touch "$file"
+    end
+    # Materialize content with escapes/newlines
+    printf "%b" "$content" > "$tmpc"; or return 1
+    # If both markers are present, replace inline at original position; else append at end
+    if grep -F -q -- "$start" "$file"; and grep -F -q -- "$end" "$file"
+        awk -v s="$start" -v e="$end" -v cf="$tmpc" 'BEGIN{skip=0;}
+            $0==s {
+                # print replacement content
+                while ((getline l < cf) > 0) print l; close(cf);
+                skip=1; next
+            }
+            skip==1 && $0==e { skip=0; next }
+            skip==0 { print $0 }' "$file" > "$tmpout"; or return 1
+        mv "$tmpout" "$file"
+    else
+        cat "$file" > "$tmpout"; and cat "$tmpc" >> "$tmpout"; or return 1
+        mv "$tmpout" "$file"
+    end
 end
 
 # Ensure Homebrew (Linuxbrew) is installed and available in fish
@@ -146,14 +183,18 @@ function ensure_yay
         err "Failed to clone yay-bin from AUR"
         return 1
     end
-    pushd "$builddir/yay-bin" >/dev/null
+    set -l oldpwd $PWD
+    cd "$builddir/yay-bin"; or begin
+        err "Failed to cd to $builddir/yay-bin"
+        return 1
+    end
     info "Building and installing yay"
     makepkg -si --noconfirm; or begin
-        popd >/dev/null
+        cd $oldpwd >/dev/null
         err "Failed to build/install yay"
         return 1
     end
-    popd >/dev/null
+    cd $oldpwd >/dev/null
     rm -rf -- "$builddir"
     set -g SUMMARY_YAY "installed"
 end
@@ -206,6 +247,9 @@ set -l summary_bootloader_update "skipped"
 set -l summary_hyprland_pkg "skipped"
 set -l summary_autologin "skipped"
 set -l summary_hypr_autostart "skipped"
+set -l did_theme_rebuild 0
+set -l summary_file_manager_pkg "skipped"
+set -l summary_file_manager_default "unchanged"
 
 # Wallpapers copy
 if test -n "$wallpapers_src"
@@ -220,8 +264,8 @@ if test -n "$wallpapers_src"
         info "Target exists: $target_wp"
     end
 
-    info "Copying wallpapers (no overwrite) from $wallpapers_src to $target_wp"
-    copy_merge_no_overwrite "$wallpapers_src" "$target_wp"; or begin
+    info "Copying wallpapers (update only) from $wallpapers_src to $target_wp"
+    copy_update_only "$wallpapers_src" "$target_wp"; or begin
         err "Copy failed (wallpapers)"
         exit 1
     end
@@ -245,13 +289,13 @@ if test -n "$caelestia_src"
         info "Target exists: $target_c"
     end
 
-    info "Copying Caelestia config (overwrite) from $caelestia_src to $target_c"
-    copy_overwrite "$caelestia_src" "$target_c"; or begin
+    info "Copying Caelestia config (update only) from $caelestia_src to $target_c"
+    copy_update_only "$caelestia_src" "$target_c"; or begin
         err "Copy failed (caelestia)"
         exit 1
     end
-    log "Caelestia config is in place at $target_c (overwritten)"
-    set summary_caelestia "overwritten in $target_c"
+    log "Caelestia config is in place at $target_c (updated)"
+    set summary_caelestia "updated in $target_c"
     set did_anything 1
 else
     warn "No Caelestia source found; skipping"
@@ -262,7 +306,7 @@ if test $did_anything -eq 0
 end
 
 # Plymouth install and theme setup (Cybex)
-if pacman -Qi -- plymouth >/dev/null 2>/dev/null
+if is_installed_pacman plymouth
     set summary_plymouth_pkg "already installed"
 else
     info "Installing plymouth"
@@ -284,14 +328,49 @@ if test -n "$plymouth_theme_src"
     set -l plymouth_theme_dst "/usr/share/plymouth/themes/cybex"
     info "Installing Plymouth theme 'cybex' to $plymouth_theme_dst"
     if type -q sudo
-        if sudo mkdir -p -- "/usr/share/plymouth/themes"; and sudo cp -R -f -- "$plymouth_theme_src/." "$plymouth_theme_dst/"
-            set summary_plymouth_theme "installed"
+        if sudo mkdir -p -- "/usr/share/plymouth/themes"
+            # Copy with update-only and capture whether any files were actually copied
+            set -l cp_out (sudo cp -R -u -v -- "$plymouth_theme_src/." "$plymouth_theme_dst/")
+            set -l cp_out_str (string join ' ' $cp_out)
+            set -l theme_updated 0
+            if test -n "$cp_out_str"
+                set summary_plymouth_theme "installed"
+                set theme_updated 1
+            else
+                set summary_plymouth_theme "already present"
+            end
+
             if type -q plymouth-set-default-theme
-                info "Setting default Plymouth theme to 'cybex' and rebuilding initramfs"
-                if sudo plymouth-set-default-theme -R cybex
-                    set summary_plymouth_theme "installed and set as default"
+                # Read current default theme from plymouthd.conf if available
+                set -l current_theme ""
+                if test -r /etc/plymouth/plymouthd.conf
+                    set -l current_theme_raw (sudo awk -F= '/^[[:space:]]*Theme[[:space:]]*=/{print $2; exit}' /etc/plymouth/plymouthd.conf)
+                    set current_theme (string trim -- $current_theme_raw)
+                    set current_theme (string replace -a '"' '' -- $current_theme)
+                    set current_theme (string replace -a "'" '' -- $current_theme)
+                end
+
+                set -l need_set 0
+                if test "$current_theme" != "cybex"
+                    set need_set 1
+                end
+                if test $theme_updated -eq 1
+                    # Ensure rebuild happens to pick up new theme assets
+                    set need_set 1
+                end
+
+                if test $need_set -eq 1
+                    info "Setting default Plymouth theme to 'cybex' and rebuilding initramfs"
+                    if sudo plymouth-set-default-theme -R cybex
+                        set summary_plymouth_theme "installed and set as default"
+                        set did_theme_rebuild 1
+                        set summary_initramfs "rebuilt"
+                    else
+                        warn "Failed to set default theme via plymouth-set-default-theme"
+                    end
                 else
-                    warn "Failed to set default theme via plymouth-set-default-theme"
+                    info "Default Plymouth theme already 'cybex'; skipping rebuild"
+                    # Keep summary as 'already present' if nothing changed
                 end
             else
                 warn "plymouth-set-default-theme not found; theme copied only"
@@ -319,12 +398,19 @@ else
     set -l hooks_inner (sed -n -E 's/^[[:space:]]*HOOKS=\(([^)]*)\).*$/\1/p' $mkconf | head -n1)
     if test -n "$hooks_inner"
         set -l tokens $hooks_inner
-        if contains -- plymouth $tokens
+        # Normalize tokens by stripping quotes for matching, but keep original tokens for output
+        set -l tokens_clean
+        for t in $tokens
+            set -l q (string replace -a '"' '' -- $t)
+            set q (string replace -a "'" '' -- $q)
+            set tokens_clean $tokens_clean $q
+        end
+        if contains -- plymouth $tokens_clean
             set summary_plymouth_hook "already present"
         else
             set -l idx_udev 0
-            for i in (seq 1 (count $tokens))
-                if test $tokens[$i] = udev
+            for i in (seq 1 (count $tokens_clean))
+                if test $tokens_clean[$i] = udev
                     set idx_udev $i
                     break
                 end
@@ -335,8 +421,8 @@ else
             else
                 # Try after systemd (systemd-based images)
                 set -l idx_systemd 0
-                for i in (seq 1 (count $tokens))
-                    if test $tokens[$i] = systemd
+                for i in (seq 1 (count $tokens_clean))
+                    if test $tokens_clean[$i] = systemd
                         set idx_systemd $i
                         break
                     end
@@ -346,8 +432,8 @@ else
                 else
                     # Try after base
                     set -l idx_base 0
-                    for i in (seq 1 (count $tokens))
-                        if test $tokens[$i] = base
+                    for i in (seq 1 (count $tokens_clean))
+                        if test $tokens_clean[$i] = base
                             set idx_base $i
                             break
                         end
@@ -383,7 +469,7 @@ else
 end
 
 # Hyprland: install, enable TTY1 autologin, and autostart on login
-if pacman -Qi -- hyprland >/dev/null 2>/dev/null
+if is_installed_pacman hyprland
     set summary_hyprland_pkg "already installed"
 else
     info "Installing hyprland"
@@ -430,43 +516,68 @@ if not test -f "$fish_cfg"
     mkdir -p (dirname "$fish_cfg"); and touch "$fish_cfg"
 end
 # Replace any existing block between markers to avoid stale/broken content
-set -l tmpf (mktemp)
-if test -z "$tmpf"
-    err "Failed to create temporary file for fish config"
+set -l hypr_start "# --- autostart Hyprland on tty1 ($hypr_marker) ---"
+set -l hypr_end   "# --- end $hypr_marker ---"
+if not replace_block "$fish_cfg" "$hypr_start" "$hypr_end" "$hypr_snip"
+    err "Failed to update $fish_cfg"
 else
-    awk 'BEGIN{skip=0}
-         index($0, "# --- autostart Hyprland on tty1 (" ) {skip=1; next}
-         index($0, "# --- end " ) && skip==1 {skip=0; next}
-         skip==0 {print $0}' "$fish_cfg" > "$tmpf"
-    and printf "%b" "$hypr_snip" >> "$tmpf"
-    and mv "$tmpf" "$fish_cfg"; or begin
-        err "Failed to update $fish_cfg"
-    end
     set summary_hypr_autostart "configured"
 end
 
 # Also add autostart for bash login shells on TTY1 (in case fish isn't default)
 set -l bash_profile "$HOME/.bash_profile"
 set -l bash_marker "arch-myway-hypr"
-set -l bash_snip "# --- $bash_marker ---\nif [ -z \"$DISPLAY\" ] && [ \"$(tty)\" = \"/dev/tty1\" ]; then\n  if command -v Hyprland >/dev/null 2>&1; then\n    exec Hyprland\n  fi\nfi\n# --- end $bash_marker ---\n"
+set -l bash_snip "# --- $bash_marker ---\nif [ -z \"\\$DISPLAY\" ] && [ \"$(tty)\" = \"/dev/tty1\" ]; then\n  if command -v Hyprland >/dev/null 2>&1; then\n    exec Hyprland\n  fi\nfi\n# --- end $bash_marker ---\n"
 if not test -f "$bash_profile"
     touch "$bash_profile"
 end
-set -l tmpb (mktemp)
-if test -n "$tmpb"
-    awk 'BEGIN{skip=0}
-         index($0, "# --- $bash_marker ---") {skip=1; next}
-         index($0, "# --- end $bash_marker ---") && skip==1 {skip=0; next}
-         skip==0 {print $0}' "$bash_profile" > "$tmpb"
-    and printf "%b" "$bash_snip" >> "$tmpb"
-    and mv "$tmpb" "$bash_profile"
-end
+set -l bash_start "# --- $bash_marker ---"
+set -l bash_end   "# --- end $bash_marker ---"
+replace_block "$bash_profile" "$bash_start" "$bash_end" "$bash_snip" >/dev/null 2>&1
 
 # Pause after autologin + Hyprland
 ## (pause removed)
 
-# Rebuild initramfs if plymouth hook was added or plymouth theme was set
-if test "$summary_plymouth_hook" = added
+# File manager: ensure Nautilus and set as default
+if is_installed_pacman nautilus
+    set summary_file_manager_pkg "already installed"
+else
+    info "Installing Nautilus (file manager)"
+    if ensure_pacman_packages nautilus
+        set summary_file_manager_pkg "installed"
+    else
+        err "Failed to install Nautilus"
+        set summary_file_manager_pkg "install failed"
+    end
+end
+
+# Ensure xdg-mime is available to set defaults
+if not type -q xdg-mime
+    info "Installing xdg-utils to manage default applications"
+    ensure_pacman_packages xdg-utils >/dev/null 2>&1
+end
+
+if type -q xdg-mime
+    set -l current_fm (xdg-mime query default inode/directory 2>/dev/null)
+    set -l target_fm "org.gnome.Nautilus.desktop"
+    if test "$current_fm" != "$target_fm"
+        info "Setting default file manager to Nautilus (inode/directory)"
+        if xdg-mime default $target_fm inode/directory
+            set summary_file_manager_default "set to Nautilus"
+        else
+            warn "Failed to set default file manager via xdg-mime"
+            set summary_file_manager_default "set failed"
+        end
+    else
+        set summary_file_manager_default "already Nautilus"
+    end
+else
+    warn "xdg-mime not available; cannot set default file manager"
+    set summary_file_manager_default "skipped"
+end
+
+# Rebuild initramfs if plymouth hook was added and theme didn't already rebuild
+if test "$summary_plymouth_hook" = added; and test $did_theme_rebuild -eq 0
     if type -q sudo; and type -q mkinitcpio
         info "Rebuilding initramfs (mkinitcpio -P)"
         if sudo mkinitcpio -P
@@ -615,12 +726,12 @@ set -l pkgs_installed
 set -l pkgs_present
 set -l pkgs_failed
 for p in $default_pkgs
-    if pacman -Qi -- $p >/dev/null 2>/dev/null
+    if is_installed_pacman $p
         log "$p is already installed"
         set pkgs_present $pkgs_present $p
     else
         info "Installing $p via yay"
-        if yay -S --needed --noconfirm -- $p
+        if ensure_yay_packages $p
             set pkgs_installed $pkgs_installed $p
         else
             err "Failed to install $p"
@@ -707,6 +818,7 @@ end
 echo "- Plymouth:    pkg=$summary_plymouth_pkg, theme=$summary_plymouth_theme, hook=$summary_plymouth_hook, initramfs=$summary_initramfs"
 echo "- Kernel:      params=$summary_kernel_params, bootloader_update=$summary_bootloader_update"
 echo "- Hyprland:    pkg=$summary_hyprland_pkg, autologin=$summary_autologin, autostart=$summary_hypr_autostart"
+echo "- FileMgr:     pkg=$summary_file_manager_pkg, default=$summary_file_manager_default"
 
 # Derive overall Plymouth readiness status
 set -l missing
